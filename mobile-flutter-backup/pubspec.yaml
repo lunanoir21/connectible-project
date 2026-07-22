@@ -1,0 +1,48 @@
+name: connectible_mobile
+description: Connectible mobile app - cross-device sync client (Flutter).
+publish_to: "none"
+version: 0.1.0+1
+
+environment:
+  sdk: ">=3.4.0 <4.0.0"
+  flutter: ">=3.22.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+
+  # State management (per project spec: Provider).
+  provider: ^6.1.2
+
+  # gRPC + protobuf runtime for the generated connectible.proto stubs
+  # (see tool/gen_proto.sh to regenerate lib/src/generated).
+  grpc: ^3.2.4
+  protobuf: ^3.1.0
+  fixnum: ^1.1.0
+
+  # Local network discovery of daemons advertising _connectible._tcp.
+  multicast_dns: ^0.3.2+7
+  # Advertising this phone as a _connectible._tcp service so the desktop
+  # daemon can discover it (multicast_dns is browse-only). Uses the OS
+  # service-discovery APIs (Android NsdManager / iOS NetService). 5.x is
+  # required for AGP-8 compatibility (older nsd_android has no namespace).
+  nsd: ^5.0.0
+
+  # Feature plumbing.
+  file_picker: ^11.0.2 # choose a file to send
+  path_provider: ^2.1.4 # received-files directory
+  shared_preferences: ^2.3.2 # persist theme + locale
+  crypto: ^3.0.5 # SHA-256 / clipboard content hashing
+  basic_utils: ^5.7.0
+  battery_plus: ^6.0.0 # phone battery level/charging -> BatteryStatus (Phase B)
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^4.0.0
+  # Lets file_transfer_model_test.dart fake getApplicationDocumentsPath()
+  # instead of needing a real platform channel (T-905/T-908).
+  path_provider_platform_interface: ^2.1.3
+
+flutter:
+  uses-material-design: true

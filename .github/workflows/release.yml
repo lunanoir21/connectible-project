@@ -1,0 +1,136 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  # Single statically-linked daemon binary (musl), per the single-binary
+  # deployment requirement in RULES.md.
+  daemon:
+    name: Daemon (static musl)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build deps
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler musl-tools
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Build static daemon
+        run: cargo build --release --locked -p connectibled --target x86_64-unknown-linux-musl
+
+      - name: Stage artifact
+        run: |
+          mkdir -p dist
+          cp target/x86_64-unknown-linux-musl/release/connectibled dist/connectibled-linux-x86_64
+          sha256sum dist/connectibled-linux-x86_64 > dist/connectibled-linux-x86_64.sha256
+          # T-1201: ship the systemd user unit alongside the binary so
+          # "persistent background service" is a download-and-copy away,
+          # not a copy-paste-from-the-README-into-a-file affair.
+          cp daemon/packaging/connectibled.service dist/
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: daemon
+          path: dist/*
+
+  # Tauri desktop bundle (.deb / AppImage).
+  desktop:
+    name: Desktop bundle (Tauri)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            protobuf-compiler \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+
+      - name: Install frontend deps
+        working-directory: desktop
+        run: npm ci
+
+      - name: Build Tauri app
+        working-directory: desktop
+        run: npx tauri build
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: desktop
+          path: |
+            desktop/src-tauri/target/release/bundle/deb/*.deb
+            desktop/src-tauri/target/release/bundle/appimage/*.AppImage
+
+  # Flutter Android APK.
+  mobile:
+    name: Mobile APK (Flutter)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Scaffold + generate + build
+        working-directory: mobile
+        run: |
+          flutter create --platforms=android .
+          dart pub global activate protoc_plugin 21.1.2
+          export PATH="$PATH:$HOME/.pub-cache/bin"
+          ./tool/gen_proto.sh
+          flutter pub get
+          flutter build apk --release
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mobile
+          path: mobile/build/app/outputs/flutter-apk/app-release.apk
+
+  # Collect all artifacts and publish the GitHub Release.
+  publish:
+    name: Publish release
+    needs: [daemon, desktop, mobile]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/**/*
+          generate_release_notes: true

@@ -1,0 +1,864 @@
+syntax = "proto3";
+
+// Connectible wire protocol.
+//
+// Versioning notes:
+// - This file defines protocol version 0 (MVP, pre-1.0). Field numbers
+//   1-15 are reserved for high-frequency fields (1-byte tag encoding);
+//   keep hot-path fields (ids, type discriminators, chunk payloads) in
+//   that range.
+// - Never renumber or remove an existing field. If a field is no longer
+//   used, reserve its number and name instead of deleting outright:
+//     reserved 7;
+//     reserved "old_field_name";
+// - New fields must be optional (proto3 default) so that old and new
+//   daemons/clients can interoperate during a rolling upgrade. A daemon
+//   MUST ignore unknown fields rather than reject the message.
+// - Breaking changes (changing a field's type, changing RPC semantics)
+//   require a new package version, e.g. `package connectible.v2;`, and
+//   the daemon should be able to speak both v1 and v2 during a
+//   deprecation window.
+// - The `protocol_version` field in Identity is the source of truth for
+//   negotiating capabilities between two peers; do not infer version
+//   from the presence/absence of optional fields.
+
+package connectible.v1;
+
+option go_package = "github.com/connectible/connectible/proto;connectiblev1";
+
+// ---------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------
+
+// Platform the peer is running on. Used to adapt input injection and
+// clipboard backends (e.g. daemon picks ydotool vs wayland-client vs
+// mobile IME hooks).
+enum Platform {
+  PLATFORM_UNSPECIFIED = 0;
+  PLATFORM_LINUX_X11 = 1;
+  PLATFORM_LINUX_WAYLAND = 2;
+  PLATFORM_WINDOWS = 3;
+  PLATFORM_MACOS = 4;
+  PLATFORM_ANDROID = 5;
+  PLATFORM_IOS = 6;
+}
+
+// Coarse device role, purely informational for UI iconography.
+enum DeviceType {
+  DEVICE_TYPE_UNSPECIFIED = 0;
+  DEVICE_TYPE_DESKTOP = 1;
+  DEVICE_TYPE_LAPTOP = 2;
+  DEVICE_TYPE_PHONE = 3;
+  DEVICE_TYPE_TABLET = 4;
+}
+
+// Type of remote input event carried inside RemoteInputEvent.payload.
+enum InputEventType {
+  INPUT_EVENT_TYPE_UNSPECIFIED = 0;
+  INPUT_EVENT_TYPE_MOUSE_MOVE = 1;
+  INPUT_EVENT_TYPE_MOUSE_BUTTON = 2;
+  INPUT_EVENT_TYPE_MOUSE_SCROLL = 3;
+  INPUT_EVENT_TYPE_KEY = 4;
+}
+
+// Mouse button identifiers, deliberately mirroring X11 button numbering
+// so the daemon's X11 backend needs no translation table.
+enum MouseButton {
+  MOUSE_BUTTON_UNSPECIFIED = 0;
+  MOUSE_BUTTON_LEFT = 1;
+  MOUSE_BUTTON_MIDDLE = 2;
+  MOUSE_BUTTON_RIGHT = 3;
+}
+
+// Standardized error codes so clients can branch on error type instead
+// of parsing human-readable message strings.
+enum ErrorCode {
+  ERROR_CODE_UNSPECIFIED = 0;
+  ERROR_CODE_UNAUTHENTICATED = 1;
+  ERROR_CODE_PAIRING_REJECTED = 2;
+  ERROR_CODE_PAIRING_TIMEOUT = 3;
+  ERROR_CODE_DEVICE_NOT_FOUND = 4;
+  ERROR_CODE_FILE_TRANSFER_FAILED = 5;
+  ERROR_CODE_CHECKSUM_MISMATCH = 6;
+  ERROR_CODE_UNSUPPORTED_PLATFORM = 7;
+  ERROR_CODE_INTERNAL = 8;
+  ERROR_CODE_PROTOCOL_VERSION_MISMATCH = 9;
+  ERROR_CODE_RATE_LIMITED = 10;
+  // TOFU (T-C3): a paired peer presented a TLS certificate whose
+  // fingerprint does not match the one pinned at first pairing -- a
+  // re-keyed peer or an imposter. The connection is refused; the user
+  // resolves it by forgetting and re-pairing the device.
+  ERROR_CODE_FINGERPRINT_CHANGED = 11;
+}
+
+// ---------------------------------------------------------------------
+// Message 1: Identity
+// ---------------------------------------------------------------------
+
+// Sent immediately after TLS handshake completes, in both directions,
+// before any other message. Establishes who the peer is and what
+// protocol/capabilities it speaks. Also re-sent (without device_id
+// changing) on every reconnect so either side can detect a stale
+// cached name/type and refresh its UI.
+message Identity {
+  // Stable, randomly generated UUIDv4 assigned on first run and
+  // persisted to disk. This is the primary key used in the SQLite
+  // `devices` table -- never derive it from hostname or IP, both of
+  // which can change.
+  string device_id = 1;
+
+  // User-facing device name (e.g. "Anil's Laptop"). May be edited by
+  // the user post-pairing; changes are broadcast via a fresh Identity
+  // message on the next handshake.
+  string device_name = 2;
+
+  Platform platform = 3;
+
+  DeviceType device_type = 4;
+
+  // Monotonically increasing protocol version this build speaks.
+  // Peers negotiate the lower of the two versions. A mismatch that
+  // cannot be bridged results in ERROR_CODE_PROTOCOL_VERSION_MISMATCH.
+  uint32 protocol_version = 5;
+
+  // Application (daemon/app) semantic version string, informational
+  // only, shown in UI for debugging ("connected to v0.3.1").
+  string app_version = 6;
+
+  // Capability flags so peers can skip probing for features that will
+  // never be supported (e.g. a headless daemon build with no input
+  // injection backend compiled in).
+  repeated string capabilities = 7; // e.g. "clipboard", "file_transfer", "remote_input", "notifications"
+}
+
+// ---------------------------------------------------------------------
+// Message 2: ClipboardData
+// ---------------------------------------------------------------------
+
+// Pushed whenever the local clipboard changes and the feature is
+// enabled for the target device. The receiving side applies it to its
+// own clipboard and MUST suppress the resulting local change-detection
+// event to avoid an infinite echo loop (track last-applied hash).
+message ClipboardData {
+  // MIME type of `content`, e.g. "text/plain", "image/png". MVP only
+  // guarantees text/plain; other types are best-effort.
+  string mime_type = 1;
+
+  bytes content = 2;
+
+  // Unix epoch milliseconds when the clipboard change was captured on
+  // the sending side. Used for last-writer-wins conflict resolution
+  // and to detect clock skew (see Error handling / edge cases in
+  // PLAN.md); a receiver should log a warning, not fail, on skew.
+  int64 captured_at_ms = 3;
+
+  // SHA-256 hex digest of `content`, used for echo-suppression and to
+  // let large clipboard payloads be deduplicated without re-hashing.
+  string content_hash = 4;
+}
+
+// ---------------------------------------------------------------------
+// Message 3: RemoteInputEvent
+// ---------------------------------------------------------------------
+
+// One remote-desktop input event. Sent at high frequency during an
+// active remote-control session (mouse move can be dozens of
+// messages/second), so keep this message as small as possible -- that
+// is why coordinates are normalized floats rather than event-specific
+// sub-messages with padding.
+message RemoteInputEvent {
+  InputEventType type = 1;
+
+  // Normalized [0.0, 1.0] pointer position relative to the target
+  // display's top-left corner. Normalized (not pixel) coordinates let
+  // the sender not need to know the receiver's screen resolution.
+  // Populated for MOUSE_MOVE.
+  float x = 2;
+  float y = 3;
+
+  // Populated for MOUSE_BUTTON.
+  MouseButton button = 4;
+  bool pressed = 5; // true = button down, false = button up
+
+  // Populated for MOUSE_SCROLL. Positive = scroll up/right.
+  float scroll_delta_x = 6;
+  float scroll_delta_y = 7;
+
+  // Populated for KEY. Uses the X11 keysym value so the Linux backend
+  // (ydotool / wayland-client) needs no translation table; other
+  // platforms map to/from their native keycodes at the edge.
+  uint32 key_code = 8;
+  bool key_pressed = 9;
+
+  // Optional modifier mask, bit flags: 1=shift, 2=ctrl, 4=alt, 8=meta.
+  uint32 modifiers = 10;
+}
+
+// ---------------------------------------------------------------------
+// Message 4: FileTransferStart
+// ---------------------------------------------------------------------
+
+// Announces an incoming file before any FileChunk is sent, allowing
+// the receiver to pre-allocate disk space, show a progress UI, and
+// reject the transfer up front (e.g. insufficient disk space, user
+// declines) without wasting bandwidth on chunks.
+message FileTransferStart {
+  // Randomly generated per-transfer identifier correlating this
+  // announcement with the FileChunk stream and any resume request.
+  string transfer_id = 1;
+
+  string file_name = 2;
+
+  int64 file_size_bytes = 3;
+
+  // SHA-256 hex digest of the complete file, verified by the receiver
+  // after the last chunk to catch corruption (see PLAN.md edge cases).
+  string file_hash = 4;
+
+  // Fixed chunk size in bytes this sender will use, so the receiver
+  // can pre-size its write buffer. MVP default is 65536 (65 KB).
+  uint32 chunk_size_bytes = 5;
+
+  // If set, the receiver should attempt to resume a previously
+  // interrupted transfer with this transfer_id starting at
+  // resume_offset_bytes instead of starting from zero (see
+  // FileChunk.offset_bytes and PLAN.md network-interruption handling).
+  int64 resume_offset_bytes = 6;
+
+  string mime_type = 7;
+}
+
+// ---------------------------------------------------------------------
+// Message 5: FileChunk
+// ---------------------------------------------------------------------
+
+// A single resumable chunk of file data. Chunks may be re-sent after a
+// dropped connection; the receiver deduplicates using offset_bytes, so
+// a resend of an already-written offset is a safe no-op overwrite.
+message FileChunk {
+  string transfer_id = 1;
+
+  // Byte offset of `data` within the complete file. Explicit (rather
+  // than an implicit running counter) so chunks can be resumed or
+  // retried out of strict order after a reconnect.
+  int64 offset_bytes = 2;
+
+  bytes data = 3;
+
+  // True on the final chunk of the transfer; triggers hash
+  // verification against FileTransferStart.file_hash on the receiver.
+  bool is_last = 4;
+
+  // CRC32 of this individual chunk's `data`, cheap to compute and lets
+  // the receiver detect a corrupted chunk immediately and request a
+  // re-send of just that chunk instead of failing the whole transfer.
+  uint32 chunk_checksum = 5;
+}
+
+// ---------------------------------------------------------------------
+// Message 6: BatteryStatus
+// ---------------------------------------------------------------------
+
+// Polled periodically (MVP: every 60s, or on significant change) and
+// pushed to paired devices that have subscribed to battery updates.
+message BatteryStatus {
+  // 0-100.
+  uint32 percentage = 1;
+
+  bool is_charging = 2;
+
+  // -1 if unknown / not reported by the platform (e.g. desktop with no
+  // battery, or a VM). Consumers must treat negative as "no estimate".
+  int32 minutes_remaining = 3;
+
+  int64 reported_at_ms = 4;
+}
+
+// ---------------------------------------------------------------------
+// Message 7: NotificationData
+// ---------------------------------------------------------------------
+
+// Forwards a system notification from one device to another (e.g.
+// phone notification mirrored to desktop).
+message NotificationData {
+  // Identifier from the originating platform's notification system,
+  // used to correlate a later dismiss/update/action-invoked event.
+  string notification_id = 1;
+
+  string app_name = 2;
+
+  string title = 3;
+
+  string body = 4;
+
+  // Optional icon, small (<= 64KB recommended); omit for text-only
+  // notifications to save bandwidth.
+  bytes icon = 5;
+
+  int64 posted_at_ms = 6;
+
+  // If true, this message represents dismissal of a previously
+  // forwarded notification (title/body/icon are unset in that case).
+  bool is_dismissal = 7;
+}
+
+// ---------------------------------------------------------------------
+// Message 8: Error
+// ---------------------------------------------------------------------
+
+// Generic error envelope, sent either as a unary RPC's error detail or
+// as a message on the SyncStream when an in-stream operation
+// (clipboard push, file chunk, input event) fails asynchronously and
+// there is no synchronous RPC response to attach the error to.
+message Error {
+  ErrorCode code = 1;
+
+  string message = 2;
+
+  // Free-form key/value context for logs/debugging, e.g.
+  // {"transfer_id": "...", "expected_hash": "...", "actual_hash": "..."}.
+  map<string, string> details = 3;
+}
+
+// ---------------------------------------------------------------------
+// Message 9: FileChunkRequest
+// ---------------------------------------------------------------------
+
+// Sent by the receiver back to the sender when a FileChunk fails its
+// CRC32 check, asking for that one chunk to be resent rather than
+// aborting or falling back to a full resume-from-offset. The sender
+// treats this exactly like a fresh FileChunk send at offset_bytes.
+message FileChunkRequest {
+  string transfer_id = 1;
+  int64 offset_bytes = 2;
+}
+
+// ---------------------------------------------------------------------
+// Dedicated file upload (LocalSend-style, v1.0)
+// ---------------------------------------------------------------------
+//
+// Bulk file bytes travel over their own RPCs (PrepareUpload + UploadFile,
+// see the service definition), NOT multiplexed onto the SyncStream the
+// way FileTransferStart/FileChunk above are. This decouples large
+// transfers from the real-time control channel (a control reconnect no
+// longer kills a transfer), gets TCP/HTTP-2 backpressure for free
+// (the sender awaits each streamed chunk), and lets the receiver write
+// straight to disk while folding a streaming SHA-256 -- no per-chunk
+// CRC32 resend loop and no buffering the whole file in RAM to verify it.
+// Modeled on LocalSend's prepare-upload/upload two-step but carried on
+// our own TLS 1.3 + paired-device identity, and strengthened with
+// offset-based resume (LocalSend restarts). Once these fully replace the
+// chunk path (TASKS.md Phase A cutover), FileTransferStart/FileChunk/
+// FileChunkRequest and their SyncFrame cases become reserved.
+
+// One file's metadata, declared up front so the receiver can accept or
+// decline (disk space, receiving disabled, unpaired sender) and report
+// how many bytes it already has for a resumed transfer -- before any
+// bytes are sent.
+message UploadFileMeta {
+  // Stable per (peer, file) identifier -- the sender derives it
+  // deterministically (peer id + path + size + mtime) so a retry after a
+  // dropped connection reuses the id the receiver kept its partial file
+  // under, which is what makes resume reachable. Not a fresh random per
+  // attempt.
+  string file_id = 1;
+
+  string file_name = 2;
+
+  int64 file_size_bytes = 3;
+
+  // SHA-256 hex digest of the complete file. The receiver verifies its
+  // own streaming digest against this after the last byte; empty means
+  // "skip verification" (best-effort senders only).
+  string file_hash = 4;
+
+  string mime_type = 5;
+}
+
+// Sent once to open a transfer session covering one or more files. The
+// receiver answers with an accept/resume decision per file.
+message PrepareUploadRequest {
+  // Who is sending. The receiver authorizes this against its paired-set
+  // (an unpaired sender is rejected before any file bytes move).
+  Identity sender = 1;
+
+  // Groups the files of one logical transfer so the receiver can key
+  // per-file tokens and progress under a single session.
+  string session_id = 2;
+
+  repeated UploadFileMeta files = 3;
+}
+
+// The receiver's per-file decision.
+message UploadFileOffer {
+  string file_id = 1;
+
+  // False when the receiver declines (receiving disabled, no disk space,
+  // sender not paired). reject_reason carries a machine-readable ErrorCode
+  // name for the UI to localize; token/resume are unset.
+  bool accepted = 2;
+
+  // Bytes the receiver already holds for this file_id (its partial's
+  // length). The sender begins UploadFile at this offset instead of 0.
+  int64 resume_offset_bytes = 3;
+
+  // Opaque capability the sender must echo in UploadFileHeader; ties an
+  // UploadFile stream to this accepted offer so a stream can't be
+  // spoofed onto a file the receiver never agreed to accept.
+  string token = 4;
+
+  // ErrorCode name when accepted = false (e.g. "UNAUTHENTICATED",
+  // "FILE_TRANSFER_FAILED"); empty when accepted.
+  string reject_reason = 5;
+}
+
+message PrepareUploadResponse {
+  string session_id = 1;
+  repeated UploadFileOffer offers = 2;
+}
+
+// First message of an UploadFile stream: identifies which accepted offer
+// this byte stream fulfills and where it begins.
+message UploadFileHeader {
+  string session_id = 1;
+  string file_id = 2;
+
+  // The token minted in the matching UploadFileOffer; the receiver
+  // rejects a stream whose token/session/file_id don't match a live,
+  // accepted offer.
+  string token = 3;
+
+  // Byte offset this stream starts at -- equal to the offer's
+  // resume_offset_bytes for a resumed transfer, 0 for a fresh one.
+  int64 offset_bytes = 4;
+}
+
+// One frame of an UploadFile client-stream: exactly the header (first
+// frame) or a raw byte chunk (every subsequent frame). The chunk size is
+// the sender's choice; the receiver just appends at the running offset,
+// so backpressure is whatever the stream's flow control allows.
+message UploadFilePart {
+  oneof part {
+    UploadFileHeader header = 1;
+    bytes chunk = 2;
+  }
+}
+
+// Returned once the UploadFile stream ends (or is aborted). completed +
+// hash_ok are only both true when every byte arrived and the streaming
+// SHA-256 matched UploadFileMeta.file_hash.
+message UploadFileResult {
+  string file_id = 1;
+  bool completed = 2;
+  int64 bytes_received = 3;
+  bool hash_ok = 4;
+}
+
+// ---------------------------------------------------------------------
+// Unary RPC request/response messages
+// ---------------------------------------------------------------------
+
+message PairRequest {
+  // Identity of the device requesting pairing. The daemon receiving
+  // this call shows the 6-digit PIN dialog to its local user.
+  Identity requester = 1;
+}
+
+message PairResponse {
+  bool accepted = 1;
+
+  // 6-digit numeric code, valid for 30 seconds (see PLAN.md pairing
+  // sequence). Only populated when accepted = true and PIN entry is
+  // the next step (the responder generates and displays this code
+  // locally; it is also echoed here for logging/debug builds only --
+  // production UI should not rely on reading it back over the wire on
+  // the requester side).
+  int64 pin_expires_at_ms = 2;
+
+  Error error = 3;
+}
+
+message ConfirmPinRequest {
+  string device_id = 1;
+  string pin_code = 2; // 6 ASCII digits, e.g. "042817"
+}
+
+message ConfirmPinResponse {
+  bool verified = 1;
+  Error error = 2;
+}
+
+message ListDevicesRequest {
+  // If true, only return devices currently reachable on the local
+  // network (mDNS-visible or an open connection); if false, return
+  // all known paired devices including offline ones.
+  bool online_only = 1;
+}
+
+message DeviceInfo {
+  Identity identity = 1;
+  bool online = 2;
+  int64 paired_at_ms = 3;
+  int64 last_seen_ms = 4;
+}
+
+message ListDevicesResponse {
+  repeated DeviceInfo devices = 1;
+}
+
+// Loopback-only (see "Local UI messages" section below): asks the local
+// daemon to drop its live-connection attribution for a paired device,
+// so it stops being reported as online purely because it holds an open
+// SyncStream (it may still show online afterward if mDNS-visible -- see
+// DeviceInfo.online / ListDevices comment). This does not forcibly tear
+// down the peer's underlying transport; the peer's next reconnect (or
+// re-sent Identity frame) simply re-establishes the attribution.
+message DisconnectDeviceRequest {
+  string device_id = 1;
+}
+
+message DisconnectDeviceResponse {
+  // True if a live SyncStream connection for this device_id was found
+  // and its attribution dropped; false if it was not currently
+  // connected (not an error -- disconnecting an already-offline device
+  // is a no-op).
+  bool was_connected = 1;
+}
+
+// Loopback-only (see "Local UI messages" section below): the local UI's
+// "Forget device" action (T-307). Unlike DisconnectDevice, this
+// permanently removes the device's row from the paired-devices store,
+// so it no longer appears in ListDevices at all and re-establishing a
+// connection requires a fresh Pair/ConfirmPin PIN exchange (T-015's
+// duplicate-pairing short-circuit no longer applies once forgotten).
+message ForgetDeviceRequest {
+  string device_id = 1;
+}
+
+message ForgetDeviceResponse {
+  // True if a paired device with this device_id was found and removed;
+  // false if it was already unknown (not an error -- forgetting an
+  // already-unpaired device is a no-op).
+  bool removed = 1;
+}
+
+message PingRequest {
+  int64 sent_at_ms = 1;
+}
+
+message PongRequest {
+  int64 sent_at_ms = 1;   // echoed from PingRequest
+  int64 replied_at_ms = 2;
+}
+
+// ---------------------------------------------------------------------
+// SyncStream envelope
+// ---------------------------------------------------------------------
+
+// A single bidirectional-stream frame. Exactly one of the fields below
+// is set per message (proto3 oneof enforces this and keeps the wire
+// format extensible -- adding SyncFrame case 9 later does not break
+// old parsers, which simply see an unset oneof).
+message SyncFrame {
+  oneof payload {
+    ClipboardData clipboard = 1;
+    RemoteInputEvent input_event = 2;
+    FileTransferStart file_transfer_start = 3;
+    FileChunk file_chunk = 4;
+    BatteryStatus battery_status = 5;
+    NotificationData notification = 6;
+    Error error = 7;
+    Identity identity = 8; // re-sent identity refresh, see Identity comment
+    FileChunkRequest file_chunk_request = 9; // new, additive (T-306)
+  }
+}
+
+// ---------------------------------------------------------------------
+// Local UI messages (loopback-only, T-014)
+// ---------------------------------------------------------------------
+//
+// The messages and RPCs below exist solely for the *local* UI process
+// (Tauri desktop shell, or a future settings surface) to observe daemon
+// state. The daemon MUST reject SubscribeLocalEvents / GetLocalState
+// calls whose transport peer address is not a loopback address --
+// PairingRequestedLocalEvent carries the plaintext PIN so the local
+// user can read it, and that PIN must never be observable by a remote
+// peer (which would defeat PIN-based pairing entirely).
+//
+// These were added after the v0 freeze as a backward-compatible,
+// additive change (new messages + new RPCs only), per the versioning
+// policy in this file's header. They correspond to T-014's planned
+// "dedicated local-only gRPC streaming RPC for UI consumption".
+
+message LocalEventsRequest {}
+
+// Emitted the moment a PairRequest arrives, so the local UI can show
+// the PIN dialog with a live countdown (T-014, T-036).
+message PairingRequestedLocalEvent {
+  string requester_device_id = 1;
+  string requester_device_name = 2;
+
+  // The 6-digit PIN the local user must read to the requester's user.
+  // Loopback-only (see section comment); never sent to the requester.
+  string pin_code = 3;
+
+  int64 pin_expires_at_ms = 4;
+}
+
+// One entry of the daemon's in-memory clipboard ring buffer (T-023),
+// exposed for the desktop UI's clipboard history panel (T-037).
+message ClipboardHistoryEntry {
+  // MVP is text-only, so content is a string rather than bytes.
+  string content = 1;
+
+  string mime_type = 2;
+
+  int64 captured_at_ms = 3;
+
+  // "local" for entries captured from this machine's own clipboard,
+  // or the source peer's device_id for entries applied from remote.
+  string source = 4;
+}
+
+// Progress of an in-flight *incoming* file transfer (T-027), throttled
+// by the daemon so the UI is never flooded (at most ~4 updates/second
+// per transfer).
+message TransferProgress {
+  string transfer_id = 1;
+  string file_name = 2;
+  int64 bytes_transferred = 3;
+  int64 total_bytes = 4;
+  // Exactly one of completed/failed is set on the final event.
+  bool completed = 5;
+  bool failed = 6;
+}
+
+// One event on the SubscribeLocalEvents stream. Same oneof-envelope
+// pattern as SyncFrame: adding a case later is backward-compatible.
+message LocalEvent {
+  oneof event {
+    PairingRequestedLocalEvent pairing_requested = 1;
+    BatteryStatus battery = 2;
+    NotificationData notification = 3;
+    ClipboardHistoryEntry clipboard = 4;
+    TransferProgress transfer_progress = 5;
+  }
+}
+
+message GetLocalStateRequest {}
+
+// A device currently visible via mDNS but not necessarily paired --
+// surfaced so the UI can offer a "pair with nearby device" action.
+// Distinct from DeviceInfo, which is reserved for paired devices
+// (see ListDevices / T-019).
+message NearbyDevice {
+  string device_id = 1;
+  string device_name = 2;
+  string platform = 3;
+  // Peer address as an IP string plus port, ready for the UI's Rust
+  // core to dial for Pair/SyncStream.
+  string addr = 4;
+  uint32 port = 5;
+  uint32 protocol_version = 6;
+}
+
+// Snapshot of everything the local UI needs to render its panels on
+// startup; live updates then arrive via SubscribeLocalEvents.
+message GetLocalStateResponse {
+  Identity local_identity = 1;
+  repeated string capabilities = 2;
+  repeated ClipboardHistoryEntry clipboard_history = 3;
+  // Unset if no battery report has been received from a peer yet.
+  BatteryStatus latest_battery = 4;
+  repeated NotificationData notifications = 5;
+  repeated NearbyDevice nearby_devices = 6;
+
+  // Whether incoming RemoteInputEvent frames are currently applied to
+  // the input backend (T-309). Always false when the "remote_input"
+  // capability is absent (no backend compiled/detected).
+  bool remote_input_enabled = 7;
+
+  // Whether local clipboard changes are polled/broadcast and incoming
+  // ClipboardData frames are applied (T-310). Always false when the
+  // "clipboard" capability is absent.
+  bool clipboard_sync_enabled = 8;
+}
+
+// Loopback-only (see "Local UI messages" section): lets the local UI
+// gate whether incoming RemoteInputEvent frames are actually applied
+// to the input backend (T-309), without tearing down the SyncStream
+// connection itself.
+message SetRemoteInputEnabledRequest {
+  bool enabled = 1;
+}
+
+message SetRemoteInputEnabledResponse {
+  // Echoes the value now in effect. May differ from the request if no
+  // input backend is available (the daemon rejects the call instead --
+  // see the RPC comment -- but keeping this field mirrors
+  // SetClipboardSyncEnabledResponse for symmetry).
+  bool enabled = 1;
+}
+
+// Loopback-only (see "Local UI messages" section): lets the local UI
+// (including the tray "Sync Clipboard" toggle, T-310) gate whether the
+// daemon polls/broadcasts local clipboard changes and applies incoming
+// ones, without disabling the clipboard backend entirely.
+message SetClipboardSyncEnabledRequest {
+  bool enabled = 1;
+}
+
+message SetClipboardSyncEnabledResponse {
+  bool enabled = 1;
+}
+
+// ---------------------------------------------------------------------
+// TOFU trust store (Phase C / T-C2..C5)
+// ---------------------------------------------------------------------
+
+// Loopback-only. The local client (desktop-core), which is the TLS peer
+// that actually observes a remote server's certificate, uses these to
+// read/write the pinned fingerprint the daemon persists per paired
+// device (devices.cert_fingerprint). Fingerprint = lowercase hex
+// SHA-256 of the peer end-entity certificate DER.
+
+message GetPinnedFingerprintRequest {
+  string device_id = 1;
+}
+
+message GetPinnedFingerprintResponse {
+  // Empty string means "no pin yet" (unknown device, or a pre-TOFU
+  // device awaiting record-on-first-use backfill, T-C5).
+  string fingerprint = 1;
+}
+
+message RecordFingerprintRequest {
+  string device_id = 1;
+  string fingerprint = 2;
+}
+
+message RecordFingerprintResponse {
+  // False if the device_id is not a known paired device (nothing pinned).
+  bool recorded = 1;
+}
+
+// ---------------------------------------------------------------------
+// System Doctor (Phase F / T-F7)
+// ---------------------------------------------------------------------
+
+// Loopback-only. Runs the same diagnostics engine the `connectibled
+// doctor` CLI uses, so the desktop UI and the terminal produce identical
+// results (no drift). Non-loopback callers receive PERMISSION_DENIED.
+
+message RunDiagnosticsRequest {
+  // Run only this check id; empty = run every check.
+  string check_id = 1;
+}
+
+// One check outcome. `category` is one of "environment" | "network" |
+// "pairing" | "features"; `status` is one of "ok" | "warn" | "error".
+message DiagnosticCheck {
+  string id = 1;
+  string title = 2;
+  string category = 3;
+  string status = 4;
+  string summary = 5;
+  string detail = 6;       // empty when absent
+  string remediation = 7;  // empty when absent
+  map<string, string> data = 8;
+}
+
+message RunDiagnosticsResponse {
+  repeated DiagnosticCheck checks = 1;
+  // Worst severity across all returned checks ("ok" | "warn" | "error").
+  string worst = 2;
+}
+
+// ---------------------------------------------------------------------
+// Service definition
+// ---------------------------------------------------------------------
+
+service Connectible {
+  // Bidirectional streaming RPC carrying all high-frequency, real-time
+  // traffic (clipboard, input, file chunks, battery, notifications)
+  // over a single long-lived HTTP/2 stream per paired connection. Both
+  // sides may push frames at any time; there is no strict
+  // request/response pairing within this RPC.
+  rpc SyncStream(stream SyncFrame) returns (stream SyncFrame);
+
+  // Dedicated file upload (v1.0), deliberately NOT on SyncStream so bulk
+  // bytes never share the real-time control channel. Two steps:
+  //
+  //   PrepareUpload -- the sender declares the file(s); the receiver
+  //   authorizes the sender against its paired-set, checks the receiving
+  //   gate, and answers per file with accept/decline + a resume offset
+  //   (bytes it already holds) + a token. One round trip, no bytes yet.
+  //
+  //   UploadFile -- a client-streaming RPC carrying exactly one file: the
+  //   first message is an UploadFileHeader (echoing the token + start
+  //   offset), every subsequent message a raw byte chunk written straight
+  //   to disk. The sender awaits each chunk, so HTTP/2 flow control is the
+  //   backpressure; the receiver folds a streaming SHA-256 and verifies it
+  //   at end-of-stream. A dropped stream leaves a resumable partial.
+  rpc PrepareUpload(PrepareUploadRequest) returns (PrepareUploadResponse);
+  rpc UploadFile(stream UploadFilePart) returns (UploadFileResult);
+
+  // Pairing handshake, see PLAN.md "Pairing sequence" for the full
+  // flow across both peers.
+  rpc Pair(PairRequest) returns (PairResponse);
+  rpc ConfirmPin(ConfirmPinRequest) returns (ConfirmPinResponse);
+
+  rpc ListDevices(ListDevicesRequest) returns (ListDevicesResponse);
+
+  // Loopback-only (see "Local UI messages" section): lets the local UI's
+  // "Disconnect" action drop a paired device's live-connection
+  // attribution. Non-loopback callers receive PERMISSION_DENIED.
+  rpc DisconnectDevice(DisconnectDeviceRequest) returns (DisconnectDeviceResponse);
+
+  // Loopback-only (see "Local UI messages" section): the local UI's
+  // "Forget device" action (T-307) -- permanently removes a paired
+  // device instead of merely dropping its online attribution. Non-
+  // loopback callers receive PERMISSION_DENIED.
+  rpc ForgetDevice(ForgetDeviceRequest) returns (ForgetDeviceResponse);
+
+  // Simple unary liveness/RTT check, used by the UI to show connection
+  // quality and by the daemon to prune stale entries from the online
+  // device cache.
+  rpc Ping(PingRequest) returns (PongRequest);
+
+  // Loopback-only (see "Local UI messages" section): streams pairing
+  // prompts (including the PIN to display), battery/notification
+  // forwards, clipboard history additions, and transfer progress to
+  // the local UI. Non-loopback callers receive PERMISSION_DENIED.
+  rpc SubscribeLocalEvents(LocalEventsRequest) returns (stream LocalEvent);
+
+  // Loopback-only: one-shot snapshot for UI startup, complementing the
+  // SubscribeLocalEvents live stream. Non-loopback callers receive
+  // PERMISSION_DENIED.
+  rpc GetLocalState(GetLocalStateRequest) returns (GetLocalStateResponse);
+
+  // Loopback-only: gates whether incoming RemoteInputEvent frames are
+  // applied to the input backend (T-309). Non-loopback callers receive
+  // PERMISSION_DENIED; callers get FAILED_PRECONDITION if no input
+  // backend is available at all.
+  rpc SetRemoteInputEnabled(SetRemoteInputEnabledRequest) returns (SetRemoteInputEnabledResponse);
+
+  // Loopback-only: gates whether local clipboard changes are polled/
+  // broadcast and incoming ones applied (T-310). Non-loopback callers
+  // receive PERMISSION_DENIED; callers get FAILED_PRECONDITION if no
+  // clipboard backend is available at all.
+  rpc SetClipboardSyncEnabled(SetClipboardSyncEnabledRequest) returns (SetClipboardSyncEnabledResponse);
+
+  // Loopback-only (TOFU, T-C2/C3): the local client reads the pinned
+  // certificate fingerprint for a paired device before dialing it, and
+  // records it on first use. Non-loopback callers receive
+  // PERMISSION_DENIED.
+  rpc GetPinnedFingerprint(GetPinnedFingerprintRequest) returns (GetPinnedFingerprintResponse);
+  rpc RecordFingerprint(RecordFingerprintRequest) returns (RecordFingerprintResponse);
+
+  // Loopback-only (System Doctor, T-F7): runs the shared diagnostics
+  // engine and returns structured results, so the desktop UI and the
+  // `connectibled doctor` CLI stay in lockstep. Non-loopback callers
+  // receive PERMISSION_DENIED.
+  rpc RunDiagnostics(RunDiagnosticsRequest) returns (RunDiagnosticsResponse);
+}

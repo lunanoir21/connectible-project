@@ -1,0 +1,1588 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Connectible — device sync that never leaves your network</title>
+<meta name="description" content="Connectible pairs your phone and computer over your own network. Clipboard, files, notifications, remote input — one TLS 1.3 stream, zero cloud, no accounts.">
+<meta name="theme-color" content="#08080a">
+<meta property="og:title" content="Connectible">
+<meta property="og:description" content="Device sync that never leaves your network. Clipboard, files, notifications, remote input — one TLS 1.3 stream, zero cloud.">
+<meta property="og:type" content="website">
+<meta property="og:url" content="https://lunanoir21.github.io/connectible-project/">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%2308080a'/%3E%3Cg fill='none' stroke='%23f2f2f3' stroke-width='1.6' stroke-linecap='round'%3E%3Cpath d='M16 21.5a5.5 5.5 0 0 1 0-11'/%3E%3Cpath d='M16 25.5a9.5 9.5 0 0 1 0-19' opacity='.55'/%3E%3C/g%3E%3Ccircle cx='23' cy='9' r='2.1' fill='%23f2f2f3'/%3E%3C/svg%3E">
+<style>
+  /* ------------------------------------------------------------------
+     Connectible — GitHub Pages
+     Monochrome by decree: black, grey, white. No color. No cloud.
+     Single file, zero external requests.
+     ------------------------------------------------------------------ */
+  :root {
+    color-scheme: dark;
+    --canvas: #08080a;
+    --surface: #101012;
+    --surface-2: #16161a;
+    --surface-3: #1d1d22;
+    --ink: #f2f2f3;
+    --ink-muted: #a2a2ab;
+    --ink-faint: #6d6d77;
+    --ink-ghost: #46464e;
+    --paper: #fafafa;
+    --paper-dim: #e4e4e6;
+    --line: rgba(255,255,255,0.08);
+    --line-strong: rgba(255,255,255,0.16);
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
+    --sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+
+  * , *::before, *::after { box-sizing: border-box; }
+
+  html {
+    scroll-behavior: smooth;
+    scroll-padding-top: 84px;
+  }
+
+  body {
+    margin: 0;
+    background: var(--canvas);
+    color: var(--ink);
+    font-family: var(--sans);
+    font-size: 16px;
+    line-height: 1.65;
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+    overflow-x: hidden;
+  }
+
+  /* Faint dot grid — texture without noise */
+  body::before {
+    content: "";
+    position: fixed;
+    inset: 0;
+    background-image: radial-gradient(rgba(255,255,255,0.045) 1px, transparent 1px);
+    background-size: 26px 26px;
+    mask-image: linear-gradient(to bottom, black, black 55%, transparent 96%);
+    -webkit-mask-image: linear-gradient(to bottom, black, black 55%, transparent 96%);
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  ::selection { background: var(--paper); color: var(--canvas); }
+
+  :focus-visible {
+    outline: 2px solid var(--paper);
+    outline-offset: 2px;
+    border-radius: 2px;
+  }
+
+  a { color: inherit; }
+
+  .wrap {
+    position: relative;
+    z-index: 1;
+    max-width: 1080px;
+    margin: 0 auto;
+    padding-inline: clamp(20px, 5vw, 48px);
+  }
+
+  .skip-link {
+    position: absolute;
+    left: 16px; top: -48px;
+    z-index: 100;
+    background: var(--paper); color: var(--canvas);
+    font: 500 13px/1 var(--mono);
+    padding: 10px 14px;
+    border-radius: 6px;
+    text-decoration: none;
+    transition: top .15s ease;
+  }
+  .skip-link:focus { top: 12px; }
+
+  /* ------------------------------------------------------------ nav */
+  header {
+    position: sticky;
+    top: 0;
+    z-index: 50;
+    background: rgba(8,8,10,0.82);
+    backdrop-filter: blur(14px);
+    -webkit-backdrop-filter: blur(14px);
+    border-bottom: 1px solid var(--line);
+  }
+  .nav {
+    display: flex;
+    align-items: center;
+    gap: 28px;
+    height: 60px;
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    text-decoration: none;
+    font-weight: 620;
+    letter-spacing: -0.015em;
+    font-size: 15.5px;
+  }
+  .brand svg { display: block; }
+  .nav-links {
+    display: flex;
+    gap: 4px;
+    margin-left: auto;
+  }
+  .nav-links a {
+    text-decoration: none;
+    color: var(--ink-muted);
+    font-size: 13.5px;
+    padding: 7px 11px;
+    border-radius: 7px;
+    transition: color .15s ease, background .15s ease;
+  }
+  .nav-links a:hover { color: var(--ink); background: var(--surface-2); }
+  .nav-gh {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    text-decoration: none;
+    font-size: 13.5px;
+    font-weight: 550;
+    color: var(--canvas);
+    background: var(--paper);
+    border: 1px solid var(--paper);
+    padding: 7px 14px;
+    border-radius: 8px;
+    white-space: nowrap;
+    transition: background .15s ease, border-color .15s ease;
+  }
+  .nav-gh:hover { background: var(--paper-dim); border-color: var(--paper-dim); }
+  .nav-gh svg { display: block; }
+
+  @media (max-width: 720px) {
+    .nav-links { display: none; }
+    .nav-gh { margin-left: auto; }
+  }
+
+  /* ----------------------------------------------------------- hero */
+  .hero {
+    padding: clamp(72px, 11vh, 128px) 0 clamp(48px, 7vh, 84px);
+    text-align: center;
+  }
+  .eyebrow {
+    font: 500 11.5px/1 var(--mono);
+    letter-spacing: 0.14em;
+    color: var(--ink-faint);
+    text-transform: uppercase;
+    display: inline-flex;
+    align-items: center;
+    gap: 12px;
+    margin: 0;
+  }
+  .eyebrow::before, .eyebrow::after {
+    content: "";
+    width: 28px; height: 1px;
+    background: var(--line-strong);
+  }
+  h1 {
+    margin: 26px auto 0;
+    max-width: 17ch;
+    font-size: clamp(38px, 6.4vw, 68px);
+    line-height: 1.04;
+    font-weight: 650;
+    letter-spacing: -0.032em;
+    text-wrap: balance;
+  }
+  .lede {
+    margin: 24px auto 0;
+    max-width: 56ch;
+    color: var(--ink-muted);
+    font-size: clamp(15.5px, 1.9vw, 17.5px);
+    text-wrap: pretty;
+  }
+  .lede strong { color: var(--ink); font-weight: 550; }
+  .hero-cta {
+    margin-top: 36px;
+    display: flex;
+    justify-content: center;
+    gap: 12px;
+    flex-wrap: wrap;
+  }
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    gap: 9px;
+    text-decoration: none;
+    font-size: 14px;
+    font-weight: 560;
+    padding: 12px 22px;
+    border-radius: 9px;
+    transition: background .15s ease, border-color .15s ease, transform .15s ease;
+  }
+  .btn:active { transform: translateY(1px); }
+  .btn-solid {
+    background: var(--paper);
+    color: var(--canvas);
+    border: 1px solid var(--paper);
+  }
+  .btn-solid:hover { background: var(--paper-dim); border-color: var(--paper-dim); }
+  .btn-ghost {
+    background: transparent;
+    color: var(--ink);
+    border: 1px solid var(--line-strong);
+  }
+  .btn-ghost:hover { background: var(--surface-2); border-color: rgba(255,255,255,0.26); }
+  .hero-hint {
+    margin-top: 18px;
+    font: 400 12.5px/1.6 var(--mono);
+    color: var(--ink-faint);
+  }
+  .hero-hint code { color: var(--ink-muted); }
+
+  /* --------------------------------------------------- hero diagram */
+  .diagram {
+    margin: clamp(40px, 7vh, 72px) auto 0;
+    max-width: 780px;
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background:
+      radial-gradient(120% 90% at 50% 0%, rgba(255,255,255,0.035), transparent 60%),
+      var(--surface);
+    padding: clamp(18px, 4vw, 36px) clamp(10px, 3vw, 28px);
+    overflow: hidden;
+  }
+  .diagram svg { display: block; width: 100%; height: auto; }
+  .diagram text {
+    font-family: var(--mono);
+    fill: var(--ink-faint);
+  }
+  .dg-device { stroke: var(--ink-muted); stroke-width: 1.6; fill: none; }
+  .dg-device-fill { fill: var(--surface-3); stroke: var(--ink-muted); stroke-width: 1.6; }
+  .dg-link {
+    stroke: var(--ink-faint);
+    stroke-width: 1.5;
+    stroke-dasharray: 3 8;
+    stroke-linecap: round;
+    fill: none;
+  }
+  .dg-sonar {
+    fill: none;
+    stroke: var(--ink);
+    stroke-width: 1.2;
+    opacity: 0;
+    transform-box: fill-box;
+    transform-origin: center;
+  }
+  .dg-dot { fill: var(--ink); }
+  .dg-pill {
+    fill: var(--canvas);
+    stroke: var(--line-strong);
+  }
+  @keyframes dash-flow { to { stroke-dashoffset: -22; } }
+  @keyframes dash-flow-rev { to { stroke-dashoffset: 22; } }
+  @keyframes sonar {
+    0%   { transform: scale(0.25); opacity: 0; }
+    12%  { opacity: 0.5; }
+    100% { transform: scale(1); opacity: 0; }
+  }
+  .anim .dg-link-a  { animation: dash-flow 1.6s linear infinite; }
+  .anim .dg-link-b  { animation: dash-flow-rev 1.6s linear infinite; }
+  .anim .dg-sonar   { animation: sonar 3.4s cubic-bezier(0.2, 0.6, 0.4, 1) infinite; }
+  .anim .dg-sonar.s2 { animation-delay: 1.1s; }
+  .anim .dg-sonar.s3 { animation-delay: 2.2s; }
+
+  /* ------------------------------------------------------ stat strip */
+  .stats {
+    margin-top: clamp(48px, 8vh, 88px);
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    border-block: 1px solid var(--line);
+  }
+  .stat {
+    padding: 26px 22px;
+    text-align: left;
+  }
+  .stat + .stat { border-left: 1px solid var(--line); }
+  .stat b {
+    display: block;
+    font: 600 clamp(24px, 3vw, 32px)/1.1 var(--mono);
+    letter-spacing: -0.02em;
+    color: var(--ink);
+  }
+  .stat span {
+    display: block;
+    margin-top: 8px;
+    font-size: 13px;
+    color: var(--ink-faint);
+    line-height: 1.5;
+    text-wrap: pretty;
+  }
+  @media (max-width: 720px) {
+    .stats { grid-template-columns: 1fr 1fr; }
+    .stat:nth-child(3) { border-left: none; }
+    .stat:nth-child(n+3) { border-top: 1px solid var(--line); }
+  }
+
+  /* -------------------------------------------------------- sections */
+  section { padding: clamp(72px, 11vh, 120px) 0 0; }
+  .sec-head { max-width: 680px; }
+  .sec-num {
+    font: 500 11.5px/1 var(--mono);
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+    color: var(--ink-ghost);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 0;
+  }
+  .sec-num::after { content: ""; flex: 0 0 28px; height: 1px; background: var(--line-strong); }
+  h2 {
+    margin: 18px 0 0;
+    font-size: clamp(26px, 3.6vw, 38px);
+    line-height: 1.12;
+    font-weight: 640;
+    letter-spacing: -0.025em;
+    text-wrap: balance;
+  }
+  .sec-sub {
+    margin: 14px 0 0;
+    color: var(--ink-muted);
+    font-size: 15.5px;
+    text-wrap: pretty;
+  }
+  .sec-sub code, .lede code {
+    font-family: var(--mono);
+    font-size: 0.88em;
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    padding: 1.5px 6px;
+    color: var(--ink-muted);
+  }
+
+  /* -------------------------------------------------- capability grid */
+  .grid {
+    margin-top: 44px;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 14px;
+  }
+  @media (max-width: 900px) { .grid { grid-template-columns: 1fr 1fr; } }
+  @media (max-width: 580px) { .grid { grid-template-columns: 1fr; } }
+  .card {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 24px 22px;
+    transition: border-color .2s ease, background .2s ease;
+  }
+  .card:hover { border-color: var(--line-strong); background: var(--surface-2); }
+  .card-icon {
+    width: 40px; height: 40px;
+    display: grid;
+    place-items: center;
+    border: 1px solid var(--line-strong);
+    border-radius: 10px;
+    background: var(--surface-2);
+    color: var(--ink);
+  }
+  .card h3 {
+    margin: 18px 0 0;
+    font-size: 15.5px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+  .card p {
+    margin: 8px 0 0;
+    font-size: 13.5px;
+    line-height: 1.6;
+    color: var(--ink-faint);
+    text-wrap: pretty;
+  }
+  .card p code {
+    font-family: var(--mono);
+    font-size: 0.9em;
+    color: var(--ink-muted);
+  }
+  .grid-note {
+    margin-top: 22px;
+    font-size: 13px;
+    color: var(--ink-faint);
+    border-left: 2px solid var(--line-strong);
+    padding-left: 16px;
+    max-width: 72ch;
+    line-height: 1.65;
+  }
+  .grid-note b { color: var(--ink-muted); font-weight: 560; }
+  .grid-note code { font-family: var(--mono); font-size: 0.92em; color: var(--ink-muted); }
+
+  /* ----------------------------------------------------- pairing flow */
+  .pair-layout {
+    margin-top: 48px;
+    display: grid;
+    grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+    gap: clamp(28px, 5vw, 64px);
+    align-items: start;
+  }
+  @media (max-width: 860px) { .pair-layout { grid-template-columns: 1fr; } }
+
+  .steps { display: flex; flex-direction: column; }
+  .step {
+    position: relative;
+    padding: 0 0 30px 42px;
+  }
+  .step::before {
+    content: attr(data-n);
+    position: absolute;
+    left: 0; top: 0;
+    width: 26px; height: 26px;
+    display: grid;
+    place-items: center;
+    font: 550 11.5px/1 var(--mono);
+    color: var(--ink-muted);
+    border: 1px solid var(--line-strong);
+    border-radius: 50%;
+    background: var(--surface);
+  }
+  .step:not(:last-child)::after {
+    content: "";
+    position: absolute;
+    left: 13px; top: 30px; bottom: 4px;
+    width: 1px;
+    background: var(--line);
+  }
+  .step h3 {
+    margin: 3px 0 0;
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+  .step p {
+    margin: 6px 0 0;
+    font-size: 13.5px;
+    line-height: 1.6;
+    color: var(--ink-faint);
+    text-wrap: pretty;
+  }
+  .step p code { font-family: var(--mono); font-size: 0.9em; color: var(--ink-muted); }
+
+  /* ------------------------------------------------------- PIN demo */
+  .demo {
+    border: 1px solid var(--line);
+    border-radius: 14px;
+    background: var(--surface);
+    overflow: hidden;
+  }
+  .demo-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    padding: 12px 18px;
+    border-bottom: 1px solid var(--line);
+    background: var(--surface-2);
+  }
+  .demo-head span {
+    font: 500 11px/1 var(--mono);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+  }
+  .demo-reset {
+    font: 500 11.5px/1 var(--mono);
+    color: var(--ink-faint);
+    background: none;
+    border: 1px solid var(--line-strong);
+    border-radius: 6px;
+    padding: 6px 10px;
+    cursor: pointer;
+    transition: color .15s ease, border-color .15s ease;
+  }
+  .demo-reset:hover { color: var(--ink); border-color: rgba(255,255,255,0.3); }
+  .demo-body {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+  }
+  @media (max-width: 560px) { .demo-body { grid-template-columns: 1fr; } }
+  .pane { padding: 20px; min-height: 250px; }
+  .pane + .pane { border-left: 1px solid var(--line); }
+  @media (max-width: 560px) {
+    .pane { min-height: 0; }
+    .pane + .pane { border-left: none; border-top: 1px solid var(--line); }
+  }
+  .pane-title {
+    font: 550 12px/1 var(--mono);
+    color: var(--ink-muted);
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin: 0;
+  }
+  .pane-title::before {
+    content: "";
+    width: 7px; height: 7px;
+    border-radius: 50%;
+    background: var(--ink-ghost);
+    transition: background .2s ease;
+    flex: none;
+  }
+  .pane.live .pane-title::before { background: var(--paper); }
+  .pane-log {
+    margin-top: 14px;
+    font: 400 12px/1.9 var(--mono);
+    color: var(--ink-faint);
+    min-height: 46px;
+    overflow-wrap: break-word;
+  }
+  .pane-log .ok { color: var(--ink-muted); }
+  .pane-log .err { color: var(--ink); }
+  .pin-display {
+    margin-top: 10px;
+    font: 600 34px/1 var(--mono);
+    letter-spacing: 0.22em;
+    color: var(--ink);
+    display: none;
+  }
+  .pin-display.show { display: block; }
+  .pin-timer {
+    margin-top: 14px;
+    height: 2px;
+    background: var(--surface-3);
+    border-radius: 1px;
+    overflow: hidden;
+    display: none;
+  }
+  .pin-timer.show { display: block; }
+  .pin-timer i {
+    display: block;
+    height: 100%;
+    background: var(--paper);
+    width: 100%;
+    transform-origin: left;
+  }
+  .pin-timer-label {
+    margin-top: 8px;
+    font: 400 11px/1 var(--mono);
+    color: var(--ink-ghost);
+    display: none;
+  }
+  .pin-timer-label.show { display: block; }
+  .demo-btn {
+    margin-top: 16px;
+    font: 550 13px/1 var(--mono);
+    background: var(--paper);
+    color: var(--canvas);
+    border: 1px solid var(--paper);
+    border-radius: 8px;
+    padding: 11px 16px;
+    cursor: pointer;
+    transition: background .15s ease;
+  }
+  .demo-btn:hover:not(:disabled) { background: var(--paper-dim); }
+  .demo-btn:disabled { opacity: 0.35; cursor: not-allowed; }
+  .pin-input {
+    margin-top: 16px;
+    display: none;
+    gap: 10px;
+  }
+  .pin-input.show { display: flex; }
+  .pin-input input {
+    flex: 1;
+    min-width: 0;
+    font: 600 20px/1 var(--mono);
+    letter-spacing: 0.28em;
+    text-align: center;
+    color: var(--ink);
+    background: var(--canvas);
+    border: 1px solid var(--line-strong);
+    border-radius: 8px;
+    padding: 12px 8px;
+    transition: border-color .15s ease;
+  }
+  .pin-input input:focus { outline: none; border-color: var(--paper); }
+  .pin-input input::placeholder { color: var(--ink-ghost); }
+  .pin-input button {
+    font: 550 12.5px/1 var(--mono);
+    background: var(--surface-3);
+    color: var(--ink);
+    border: 1px solid var(--line-strong);
+    border-radius: 8px;
+    padding: 0 16px;
+    cursor: pointer;
+    transition: background .15s ease, border-color .15s ease;
+  }
+  .pin-input button:hover { background: var(--surface-2); border-color: rgba(255,255,255,0.3); }
+  .attempts {
+    margin-top: 10px;
+    font: 400 11px/1.5 var(--mono);
+    color: var(--ink-ghost);
+    display: none;
+  }
+  .attempts.show { display: block; }
+  .demo-note {
+    padding: 12px 18px;
+    border-top: 1px solid var(--line);
+    font-size: 12px;
+    color: var(--ink-ghost);
+    line-height: 1.6;
+  }
+  .demo-note code { font-family: var(--mono); color: var(--ink-faint); font-size: 0.95em; }
+
+  /* -------------------------------------------------------- security */
+  .sec-grid {
+    margin-top: 44px;
+    display: grid;
+    grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
+    gap: 14px;
+    align-items: stretch;
+  }
+  @media (max-width: 860px) { .sec-grid { grid-template-columns: 1fr; } }
+  .sec-list {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 14px;
+  }
+  @media (max-width: 560px) { .sec-list { grid-template-columns: 1fr; } }
+  .boundaries {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 26px 24px;
+  }
+  .boundaries h3 {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+    display: flex;
+    align-items: center;
+    gap: 10px;
+  }
+  .boundaries h3 span {
+    font: 500 10px/1 var(--mono);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-faint);
+    border: 1px solid var(--line-strong);
+    border-radius: 99px;
+    padding: 4px 9px;
+  }
+  .boundaries p.intro {
+    margin: 10px 0 0;
+    font-size: 13px;
+    color: var(--ink-faint);
+  }
+  .boundaries ul {
+    margin: 16px 0 0;
+    padding: 0;
+    list-style: none;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+  .boundaries li {
+    font-size: 13px;
+    line-height: 1.55;
+    color: var(--ink-faint);
+    padding-left: 18px;
+    position: relative;
+    text-wrap: pretty;
+  }
+  .boundaries li::before {
+    content: "—";
+    position: absolute;
+    left: 0;
+    color: var(--ink-ghost);
+  }
+  .boundaries li b { color: var(--ink-muted); font-weight: 560; }
+  .boundaries li code { font-family: var(--mono); font-size: 0.9em; }
+
+  /* ---------------------------------------------------- architecture */
+  .arch-grid {
+    margin-top: 44px;
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 14px;
+  }
+  @media (max-width: 900px) { .arch-grid { grid-template-columns: 1fr; } }
+  .arch {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 24px 22px;
+    display: flex;
+    flex-direction: column;
+  }
+  .arch-kind {
+    font: 500 10.5px/1 var(--mono);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--ink-ghost);
+    margin: 0;
+  }
+  .arch h3 {
+    margin: 10px 0 0;
+    font: 600 17px/1.2 var(--mono);
+    letter-spacing: -0.01em;
+  }
+  .arch > p {
+    margin: 10px 0 0;
+    font-size: 13px;
+    line-height: 1.6;
+    color: var(--ink-faint);
+    text-wrap: pretty;
+  }
+  .arch p code { font-family: var(--mono); font-size: 0.92em; color: var(--ink-muted); }
+  .arch-stack {
+    margin: 18px 0 0;
+    padding: 14px 0 0;
+    border-top: 1px solid var(--line);
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .tag {
+    font: 450 11px/1 var(--mono);
+    color: var(--ink-muted);
+    background: var(--surface-2);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 5px 8px;
+  }
+  .arch-status {
+    margin-top: auto;
+    padding-top: 16px;
+    font: 400 11.5px/1.5 var(--mono);
+    color: var(--ink-ghost);
+  }
+
+  /* ------------------------------------------------------ code blocks */
+  .codeblock {
+    position: relative;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    overflow: hidden;
+  }
+  .codeblock-bar {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--line);
+    background: var(--surface-2);
+  }
+  .codeblock-bar span {
+    font: 500 11px/1 var(--mono);
+    letter-spacing: 0.1em;
+    text-transform: uppercase;
+    color: var(--ink-ghost);
+  }
+  .copy-btn {
+    font: 500 11.5px/1 var(--mono);
+    color: var(--ink-faint);
+    background: none;
+    border: 1px solid var(--line-strong);
+    border-radius: 6px;
+    padding: 6px 10px;
+    cursor: pointer;
+    transition: color .15s ease, border-color .15s ease;
+  }
+  .copy-btn:hover { color: var(--ink); border-color: rgba(255,255,255,0.3); }
+  .codeblock pre {
+    margin: 0;
+    padding: 18px 20px;
+    overflow-x: auto;
+    font: 400 13px/1.75 var(--mono);
+    color: var(--ink-muted);
+  }
+  .codeblock pre .c { color: var(--ink-ghost); }
+  .codeblock pre .k { color: var(--ink); font-weight: 550; }
+  .codeblock pre .p { color: var(--ink-ghost); user-select: none; }
+
+  .proto-wrap {
+    margin-top: 44px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    gap: 14px;
+    align-items: stretch;
+  }
+  @media (max-width: 860px) { .proto-wrap { grid-template-columns: 1fr; } }
+  .proto-side {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 26px 24px;
+  }
+  .proto-side h3 {
+    margin: 0;
+    font-size: 15.5px;
+    font-weight: 600;
+    letter-spacing: -0.01em;
+  }
+  .proto-side p {
+    margin: 10px 0 0;
+    font-size: 13.5px;
+    line-height: 1.65;
+    color: var(--ink-faint);
+    text-wrap: pretty;
+  }
+  .proto-side p code { font-family: var(--mono); font-size: 0.9em; color: var(--ink-muted); }
+  .rpc-list {
+    margin: 18px 0 0;
+    padding: 14px 0 0;
+    border-top: 1px solid var(--line);
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    font: 400 12px/1.5 var(--mono);
+    color: var(--ink-ghost);
+  }
+  .rpc-list b { color: var(--ink-muted); font-weight: 550; }
+
+  /* ------------------------------------------------------ quick start */
+  .qs-grid {
+    margin-top: 44px;
+    display: grid;
+    grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
+    gap: 14px;
+    align-items: start;
+  }
+  @media (max-width: 860px) { .qs-grid { grid-template-columns: 1fr; } }
+  .qs-reqs {
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 24px;
+  }
+  .qs-reqs h3 { margin: 0; font-size: 14.5px; font-weight: 600; }
+  .qs-reqs table {
+    margin-top: 14px;
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+  }
+  .qs-reqs td {
+    padding: 9px 0;
+    border-top: 1px solid var(--line);
+    color: var(--ink-faint);
+    vertical-align: top;
+  }
+  .qs-reqs td:first-child {
+    font: 500 12px/1.5 var(--mono);
+    color: var(--ink-muted);
+    white-space: nowrap;
+    padding-right: 18px;
+  }
+  .qs-note {
+    margin-top: 14px;
+    font-size: 12.5px;
+    color: var(--ink-ghost);
+    line-height: 1.6;
+  }
+  .qs-note code { font-family: var(--mono); color: var(--ink-faint); font-size: 0.95em; }
+
+  /* ---------------------------------------------------------- footer */
+  footer {
+    margin-top: clamp(80px, 12vh, 140px);
+    border-top: 1px solid var(--line);
+    padding: 48px 0 56px;
+  }
+  .foot {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 32px;
+    flex-wrap: wrap;
+  }
+  .foot-brand { max-width: 320px; }
+  .foot-brand .brand { font-size: 15px; }
+  .foot-brand p {
+    margin: 12px 0 0;
+    font-size: 13px;
+    color: var(--ink-ghost);
+    line-height: 1.6;
+  }
+  .foot-cols { display: flex; gap: clamp(32px, 6vw, 80px); flex-wrap: wrap; }
+  .foot-col h4 {
+    margin: 0 0 12px;
+    font: 500 10.5px/1 var(--mono);
+    letter-spacing: 0.12em;
+    text-transform: uppercase;
+    color: var(--ink-ghost);
+  }
+  .foot-col a {
+    display: block;
+    text-decoration: none;
+    font-size: 13.5px;
+    color: var(--ink-faint);
+    padding: 4px 0;
+    transition: color .15s ease;
+  }
+  .foot-col a:hover { color: var(--ink); }
+  .foot-legal {
+    margin-top: 44px;
+    padding-top: 20px;
+    border-top: 1px solid var(--line);
+    display: flex;
+    justify-content: space-between;
+    gap: 16px;
+    flex-wrap: wrap;
+    font: 400 11.5px/1.6 var(--mono);
+    color: var(--ink-ghost);
+  }
+
+  /* ----------------------------------------------------- reveal anim */
+  .js .reveal {
+    opacity: 0;
+    transform: translateY(10px);
+    transition: opacity .6s ease, transform .6s ease;
+  }
+  .js .reveal.in { opacity: 1; transform: none; }
+
+  @media (prefers-reduced-motion: reduce) {
+    html { scroll-behavior: auto; }
+    .js .reveal { opacity: 1; transform: none; transition: none; }
+    .anim .dg-link-a, .anim .dg-link-b, .anim .dg-sonar { animation: none; }
+    .dg-sonar { opacity: 0.15; transform: scale(0.7); }
+  }
+</style>
+</head>
+<body>
+<a class="skip-link" href="#main">skip to content</a>
+
+<header>
+  <div class="wrap nav">
+    <a class="brand" href="#" aria-label="Connectible — home">
+      <svg width="22" height="22" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+        <path d="M16 21.5a5.5 5.5 0 0 1 0-11" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+        <path d="M16 25.5a9.5 9.5 0 0 1 0-19" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" opacity=".5"/>
+        <circle cx="23" cy="9" r="2.2" fill="currentColor"/>
+      </svg>
+      Connectible
+    </a>
+    <nav class="nav-links" aria-label="Sections">
+      <a href="#capabilities">Capabilities</a>
+      <a href="#pairing">Pairing</a>
+      <a href="#security">Security</a>
+      <a href="#architecture">Architecture</a>
+      <a href="#quickstart">Quick start</a>
+    </nav>
+    <a class="nav-gh" href="https://github.com/lunanoir21/connectible-project" rel="noopener">
+      <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+        <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/>
+      </svg>
+      GitHub
+    </a>
+  </div>
+</header>
+
+<main id="main">
+  <!-- ============================================================ hero -->
+  <div class="wrap hero">
+    <p class="eyebrow">Open source · LAN-only · TLS 1.3</p>
+    <h1>Device sync that never leaves your network.</h1>
+    <p class="lede">
+      Connectible pairs your phone and your computer over the Wi&#8209;Fi you already own.
+      Clipboard, files, notifications, remote input — multiplexed over
+      <strong>one encrypted stream</strong>. No cloud. No accounts. No telemetry.
+    </p>
+    <div class="hero-cta">
+      <a class="btn btn-solid" href="https://github.com/lunanoir21/connectible-project" rel="noopener">View on GitHub</a>
+      <a class="btn btn-ghost" href="#quickstart">Quick start</a>
+    </div>
+    <p class="hero-hint"><code>make setup &amp;&amp; make dev</code> — that&#8217;s the whole install.</p>
+
+    <figure class="diagram anim" role="img" aria-label="Diagram: a desktop and a phone discover each other over mDNS and connect over gRPC with TLS 1.3" style="margin-inline:auto;">
+      <svg viewBox="0 0 760 268" aria-hidden="true">
+        <!-- sonar rings -->
+        <circle class="dg-sonar"    cx="160" cy="126" r="86"/>
+        <circle class="dg-sonar s2" cx="160" cy="126" r="86"/>
+        <circle class="dg-sonar s3" cx="160" cy="126" r="86"/>
+        <circle class="dg-sonar s2" cx="600" cy="126" r="86"/>
+        <circle class="dg-sonar s3" cx="600" cy="126" r="86"/>
+        <circle class="dg-sonar"    cx="600" cy="126" r="86"/>
+
+        <!-- link paths -->
+        <path class="dg-link dg-link-a" d="M 232 116 H 528"/>
+        <path class="dg-link dg-link-b" d="M 232 136 H 528"/>
+
+        <!-- desktop glyph -->
+        <rect class="dg-device-fill" x="104" y="84" width="112" height="72" rx="8"/>
+        <rect class="dg-device" x="118" y="98" width="84" height="44" rx="3" opacity="0.45"/>
+        <path class="dg-device" d="M 160 156 v 14 M 140 172 h 40"/>
+
+        <!-- phone glyph -->
+        <rect class="dg-device-fill" x="576" y="80" width="48" height="92" rx="10"/>
+        <rect class="dg-device" x="584" y="92" width="32" height="58" rx="2" opacity="0.45"/>
+        <circle class="dg-dot" cx="600" cy="161" r="2.6" opacity="0.7"/>
+
+        <!-- center pill: transport -->
+        <rect class="dg-pill" x="316" y="110" width="128" height="32" rx="16"/>
+        <text x="380" y="130" text-anchor="middle" font-size="11.5" style="fill: var(--ink-muted)">gRPC · TLS 1.3</text>
+
+        <!-- labels -->
+        <text x="160" y="212" text-anchor="middle" font-size="11">desktop · connectibled</text>
+        <text x="600" y="212" text-anchor="middle" font-size="11">mobile · flutter</text>
+        <text x="380" y="170" text-anchor="middle" font-size="10.5" style="fill: var(--ink-ghost)">SyncStream — one bidirectional frame stream</text>
+        <text x="380" y="246" text-anchor="middle" font-size="10.5" style="fill: var(--ink-ghost)">_connectible._tcp — discovered over mDNS, either side may initiate</text>
+      </svg>
+    </figure>
+
+    <!-- stat strip -->
+    <div class="stats reveal">
+      <div class="stat">
+        <b>TLS 1.3</b>
+        <span>the only protocol accepted — a TLS 1.2 handshake is refused outright</span>
+      </div>
+      <div class="stat">
+        <b>0</b>
+        <span>cloud servers, accounts, or trackers between your devices</span>
+      </div>
+      <div class="stat">
+        <b>1</b>
+        <span>bidirectional stream carries all real-time traffic, framed as protobuf</span>
+      </div>
+      <div class="stat">
+        <b>30 s</b>
+        <span>pairing-PIN lifetime; three wrong attempts end it sooner</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- ==================================================== capabilities -->
+  <section id="capabilities">
+    <div class="wrap">
+      <div class="sec-head reveal">
+        <p class="sec-num">01 — Capabilities</p>
+        <h2>Everything a cable used to do. Nothing a cloud wants to.</h2>
+        <p class="sec-sub">
+          Six capabilities, one protocol. Each is probed at daemon startup and advertised
+          to peers, so the other side&#8217;s UI greys out what this machine can&#8217;t do —
+          instead of failing when you try.
+        </p>
+      </div>
+
+      <div class="grid">
+        <div class="card reveal">
+          <div class="card-icon" aria-hidden="true">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="4" width="14" height="17" rx="2"/><path d="M9 4a3 3 0 0 1 6 0"/><path d="M9 12h6M9 16h4"/></svg>
+          </div>
+          <h3>Shared clipboard</h3>
+          <p>Copy on one device, paste on the other. Content hashing suppresses echo, so a synced copy never bounces back as a new one.</p>
+        </div>
+        <div class="card reveal">
+          <div class="card-icon" aria-hidden="true">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M13 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V9z"/><path d="M13 3v6h6"/><path d="M12 12v6m0 0-2.5-2.5M12 18l2.5-2.5"/></svg>
+          </div>
+          <h3>File transfer</h3>
+          <p>Chunked with <code>CRC32</code> per chunk and <code>SHA-256</code> over the whole file, then renamed into place. Interrupted? It resumes from the highest contiguous offset.</p>
+        </div>
+        <div class="card reveal">
+          <div class="card-icon" aria-hidden="true">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9a6 6 0 0 1 12 0c0 5 2 6 2 6H4s2-1 2-6"/><path d="M10 19a2 2 0 0 0 4 0"/></svg>
+          </div>
+          <h3>Notification mirroring</h3>
+          <p>Phone notifications appear on the desktop the moment they land — read them without reaching for the phone.</p>
+        </div>
+        <div class="card reveal">
+          <div class="card-icon" aria-hidden="true">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4l7 16 2.2-6.8L21 11z"/></svg>
+          </div>
+          <h3>Remote input</h3>
+          <p>Drive the desktop pointer and keyboard from the phone. Injected via <code>ydotool</code>/uinput and gated behind a capability flag — never silently half-working.</p>
+        </div>
+        <div class="card reveal">
+          <div class="card-icon" aria-hidden="true">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="8" width="15" height="8" rx="2"/><path d="M21 11v2"/><path d="M7 11v2" opacity=".5"/><path d="M10.5 11v2" opacity=".5"/></svg>
+          </div>
+          <h3>Battery status</h3>
+          <p>The phone&#8217;s charge level and charging state, visible from the desktop status bar. A small thing you&#8217;ll miss everywhere else.</p>
+        </div>
+        <div class="card reveal">
+          <div class="card-icon" aria-hidden="true">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 18a6 6 0 0 1 0-12" opacity=".45"/><path d="M12 15a3 3 0 0 1 0-6"/><circle cx="17.5" cy="8.5" r="1.6" fill="currentColor" stroke="none"/></svg>
+          </div>
+          <h3>Zero-config discovery</h3>
+          <p>Both peers advertise <code>_connectible._tcp</code> over mDNS and browse for each other. No IP addresses to type — and either side can initiate.</p>
+        </div>
+      </div>
+
+      <p class="grid-note reveal">
+        <b>Capability honesty:</b> capabilities ship inside each peer&#8217;s <code>Identity</code>,
+        so a Wayland desktop without an input backend simply never claims <code>remote_input</code>.
+        Features degrade at discovery time, not at use time.
+      </p>
+    </div>
+  </section>
+
+  <!-- ========================================================= pairing -->
+  <section id="pairing">
+    <div class="wrap">
+      <div class="sec-head reveal">
+        <p class="sec-num">02 — Pairing</p>
+        <h2>Trust is established in thirty seconds, on your own screens.</h2>
+        <p class="sec-sub">
+          No QR codes, no account linking, no email loop. One device shows a PIN,
+          you type it into the other. That&#8217;s the entire ceremony — try it below.
+        </p>
+      </div>
+
+      <div class="pair-layout">
+        <div class="steps reveal">
+          <div class="step" data-n="1">
+            <h3>Discover</h3>
+            <p>Both devices advertise and browse <code>_connectible._tcp</code> over mDNS. The peer&#8217;s IP and port resolve automatically.</p>
+          </div>
+          <div class="step" data-n="2">
+            <h3>Connect</h3>
+            <p>A TCP connection upgrades to TLS 1.3. The daemon&#8217;s rustls config is 1.3-only — an older handshake never completes.</p>
+          </div>
+          <div class="step" data-n="3">
+            <h3>Challenge</h3>
+            <p>The responder generates a cryptographically random 6-digit PIN, valid for 30 seconds, and shows it on its own screen.</p>
+          </div>
+          <div class="step" data-n="4">
+            <h3>Confirm</h3>
+            <p>You read the PIN off one screen and type it into the other. Comparison is constant-time; the third wrong attempt invalidates the PIN early.</p>
+          </div>
+          <div class="step" data-n="5">
+            <h3>Remember</h3>
+            <p>Both sides persist the peer to their local SQLite <code>devices</code> table. From then on, reconnecting is a TLS handshake — no PIN again.</p>
+          </div>
+        </div>
+
+        <!-- interactive PIN demo -->
+        <div class="demo reveal" id="demo">
+          <div class="demo-head">
+            <span>Pairing · live demo</span>
+            <button class="demo-reset" id="demo-reset" type="button">reset</button>
+          </div>
+          <div class="demo-body">
+            <div class="pane" id="pane-b">
+              <p class="pane-title">device-b · responder</p>
+              <div class="pane-log" id="log-b">advertising _connectible._tcp …</div>
+              <div class="pin-display" id="pin-display" aria-live="polite"></div>
+              <div class="pin-timer" id="pin-timer"><i id="pin-timer-fill"></i></div>
+              <p class="pin-timer-label" id="pin-timer-label"></p>
+            </div>
+            <div class="pane" id="pane-a">
+              <p class="pane-title">device-a · requester</p>
+              <div class="pane-log" id="log-a">peer discovered · tls 1.3 established</div>
+              <button class="demo-btn" id="pair-btn" type="button">Pair(PairRequest) →</button>
+              <div class="pin-input" id="pin-input">
+                <input id="pin-field" inputmode="numeric" autocomplete="one-time-code" maxlength="6" placeholder="······" aria-label="Enter the 6-digit PIN shown on device B">
+                <button id="pin-confirm" type="button">confirm</button>
+              </div>
+              <p class="attempts" id="attempts"></p>
+            </div>
+          </div>
+          <div class="demo-note">
+            This demo runs entirely in your browser and mirrors the real protocol:
+            30-second expiry (<code>ERROR_CODE_PAIRING_TIMEOUT</code>), three attempts,
+            and a restart from <code>Pair</code> — never a <code>ConfirmPin</code> retry.
+          </div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ======================================================== security -->
+  <section id="security">
+    <div class="wrap">
+      <div class="sec-head reveal">
+        <p class="sec-num">03 — Security</p>
+        <h2>The connection is the security.</h2>
+        <p class="sec-sub">
+          The lock isn&#8217;t a barrier in front of the product — it&#8217;s what makes every
+          capability possible. And where the MVP cuts a corner, the corner is documented, not hidden.
+        </p>
+      </div>
+
+      <div class="sec-grid">
+        <div class="sec-list">
+          <div class="card reveal">
+            <div class="card-icon" aria-hidden="true">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><rect x="5" y="11" width="14" height="9" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+            </div>
+            <h3>TLS 1.3, mandatory</h3>
+            <p>Every cross-device byte rides TLS 1.3. The rustls config offers no 1.2 fallback, so a downgrade isn&#8217;t a negotiation — it&#8217;s a refused connection.</p>
+          </div>
+          <div class="card reveal">
+            <div class="card-icon" aria-hidden="true">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6z"/></svg>
+            </div>
+            <h3>No custom crypto</h3>
+            <p>rustls and ring, plus standard hashing. Nothing hand-rolled, nothing clever — the most boring possible answer to every cryptographic question.</p>
+          </div>
+          <div class="card reveal">
+            <div class="card-icon" aria-hidden="true">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/></svg>
+            </div>
+            <h3>Constant-time PIN</h3>
+            <p>PIN comparison leaks no timing information, PINs expire in 30 seconds, and the third wrong attempt invalidates the challenge entirely.</p>
+          </div>
+          <div class="card reveal">
+            <div class="card-icon" aria-hidden="true">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><circle cx="7" cy="12" r="2.5"/><circle cx="17" cy="12" r="2.5"/><path d="M9.5 12h5"/></svg>
+            </div>
+            <h3>LAN-only by design</h3>
+            <p>There is no relay to trust because there is no relay. If a packet would have to cross your router, it doesn&#8217;t get sent.</p>
+          </div>
+        </div>
+
+        <div class="boundaries reveal">
+          <h3>Known boundaries <span>MVP</span></h3>
+          <p class="intro">Documented, not hidden:</p>
+          <ul>
+            <li><b>Certificate pinning lands in v1.0.</b> Today, self-signed certs are accepted per connection — no trust-on-first-use yet.</li>
+            <li><b>The device database is plaintext SQLite.</b> Encryption at rest is on the roadmap, not in the MVP.</li>
+            <li><b>Remote input is Linux/X11 today.</b> On Wayland the <code>remote_input</code> capability is simply not advertised until the backend exists.</li>
+            <li><b>No internet relay.</b> Off the LAN means offline — deliberately, but it&#8217;s still a boundary worth knowing.</li>
+          </ul>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ==================================================== architecture -->
+  <section id="architecture">
+    <div class="wrap">
+      <div class="sec-head reveal">
+        <p class="sec-num">04 — Architecture</p>
+        <h2>A Rust daemon at the core. Thin, honest clients around it.</h2>
+        <p class="sec-sub">
+          The wire contract is frozen as <code>connectible.proto</code> v1 — three codebases,
+          one protocol, no drift.
+        </p>
+      </div>
+
+      <div class="arch-grid">
+        <div class="arch reveal">
+          <p class="arch-kind">Daemon · Rust</p>
+          <h3>connectibled</h3>
+          <p>One binary that owns discovery, TLS, the sync stream, and persistence. Generates its self-signed cert on first run; state lives under the XDG data dir.</p>
+          <div class="arch-stack">
+            <span class="tag">tokio</span><span class="tag">tonic · gRPC/HTTP2</span><span class="tag">rustls</span><span class="tag">mdns-sd</span><span class="tag">sqlx · SQLite</span>
+          </div>
+          <p class="arch-status">built + tested — 36 tests</p>
+        </div>
+        <div class="arch reveal">
+          <p class="arch-kind">Desktop · Tauri v2</p>
+          <h3>desktop/</h3>
+          <p>React UI over a webview-free Rust <code>core</code> crate that does all daemon-client work — so the logic builds and tests anywhere the daemon does.</p>
+          <div class="arch-stack">
+            <span class="tag">Tauri v2</span><span class="tag">React 18</span><span class="tag">TypeScript</span><span class="tag">Tailwind</span>
+          </div>
+          <p class="arch-status">built + tested — 3 e2e + 19 unit</p>
+        </div>
+        <div class="arch reveal">
+          <p class="arch-kind">Mobile · Flutter</p>
+          <h3>mobile/</h3>
+          <p>No local daemon — the app speaks the protocol natively and runs its own gRPC/TLS server, so pairing works in both directions: phone to desktop, desktop to phone.</p>
+          <div class="arch-stack">
+            <span class="tag">Flutter</span><span class="tag">Dart</span><span class="tag">Provider</span>
+          </div>
+          <p class="arch-status">code complete — needs a Flutter toolchain to build</p>
+        </div>
+      </div>
+
+      <div class="proto-wrap">
+        <div class="proto-side reveal">
+          <h3>One stream, eight frames</h3>
+          <p>
+            All real-time traffic multiplexes over a single bidirectional
+            <code>SyncStream</code> RPC. Every message is one <code>SyncFrame</code> —
+            a protobuf <code>oneof</code> — so adding a capability means adding a frame,
+            not a connection.
+          </p>
+          <p>
+            Control-plane operations stay unary, where a clear request/response
+            shape beats a stream:
+          </p>
+          <div class="rpc-list">
+            <span><b>Pair</b> · begin the PIN ceremony</span>
+            <span><b>ConfirmPin</b> · finish it</span>
+            <span><b>ListDevices</b> · paired + discovered peers</span>
+            <span><b>Ping</b> · liveness</span>
+          </div>
+        </div>
+        <div class="codeblock reveal">
+          <div class="codeblock-bar">
+            <span>proto/connectible.proto</span>
+            <button class="copy-btn" type="button" data-copy="#proto-src">copy</button>
+          </div>
+          <pre id="proto-src"><span class="k">message</span> SyncFrame {
+  <span class="k">oneof</span> payload {
+    ClipboardData     clipboard           = 1;
+    RemoteInputEvent  input_event         = 2;
+    FileTransferStart file_transfer_start = 3;
+    FileChunk         file_chunk          = 4;
+    BatteryStatus     battery_status      = 5;
+    NotificationData  notification        = 6;
+    Error             error               = 7;
+    Identity          identity            = 8;
+  }
+}
+
+<span class="k">rpc</span> SyncStream(<span class="k">stream</span> SyncFrame)
+    <span class="k">returns</span> (<span class="k">stream</span> SyncFrame);</pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ====================================================== quick start -->
+  <section id="quickstart">
+    <div class="wrap">
+      <div class="sec-head reveal">
+        <p class="sec-num">05 — Quick start</p>
+        <h2>Clone, make, paired.</h2>
+        <p class="sec-sub">
+          The Makefile is the front door — <code>make</code> with no target lists everything it can do.
+        </p>
+      </div>
+
+      <div class="qs-grid">
+        <div class="codeblock reveal">
+          <div class="codeblock-bar">
+            <span>terminal</span>
+            <button class="copy-btn" type="button" data-copy="#qs-src">copy</button>
+          </div>
+          <pre id="qs-src"><span class="p">$ </span>git clone https://github.com/lunanoir21/connectible-project.git
+<span class="p">$ </span>cd connectible-project
+<span class="p">$ </span>make setup   <span class="c"># one-time: frontend deps + system-dep check</span>
+<span class="p">$ </span>make dev     <span class="c"># daemon + desktop app together; Ctrl-C stops both</span>
+
+<span class="c"># the rest of the front door</span>
+<span class="p">$ </span>make test    <span class="c"># Rust workspace + frontend tests</span>
+<span class="p">$ </span>make check   <span class="c"># clippy -D warnings + strict tsc</span>
+<span class="p">$ </span>make build   <span class="c"># release: static daemon + frontend bundle</span></pre>
+        </div>
+
+        <div class="qs-reqs reveal">
+          <h3>You&#8217;ll need</h3>
+          <table>
+            <tr><td>rust</td><td>daemon + desktop core (cargo)</td></tr>
+            <tr><td>node.js</td><td>desktop frontend toolchain</td></tr>
+            <tr><td>protoc</td><td>protobuf compiler, build-time only</td></tr>
+            <tr><td>webkit2gtk-4.1</td><td>the desktop window, on Linux</td></tr>
+          </table>
+          <p class="qs-note">
+            Mobile builds need a Flutter toolchain — see <code>mobile/README.md</code>.
+            Remote input on X11 additionally wants <code>ydotoold</code> and a udev rule;
+            without them the capability just stays off.
+          </p>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<!-- ============================================================ footer -->
+<footer>
+  <div class="wrap">
+    <div class="foot">
+      <div class="foot-brand">
+        <a class="brand" href="#" aria-label="Connectible — back to top">
+          <svg width="20" height="20" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+            <path d="M16 21.5a5.5 5.5 0 0 1 0-11" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+            <path d="M16 25.5a9.5 9.5 0 0 1 0-19" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" opacity=".5"/>
+            <circle cx="23" cy="9" r="2.2" fill="currentColor"/>
+          </svg>
+          Connectible
+        </a>
+        <p>A KDE Connect alternative built on gRPC over TLS 1.3. Your devices, your network, and nothing else in the room.</p>
+      </div>
+      <div class="foot-cols">
+        <div class="foot-col">
+          <h4>Project</h4>
+          <a href="https://github.com/lunanoir21/connectible-project" rel="noopener">GitHub</a>
+          <a href="https://github.com/lunanoir21/connectible-project/blob/main/README.md" rel="noopener">README</a>
+          <a href="https://github.com/lunanoir21/connectible-project/blob/main/ARCHITECTURE.md" rel="noopener">Architecture</a>
+        </div>
+        <div class="foot-col">
+          <h4>Internals</h4>
+          <a href="https://github.com/lunanoir21/connectible-project/blob/main/proto/connectible.proto" rel="noopener">Wire protocol</a>
+          <a href="https://github.com/lunanoir21/connectible-project/blob/main/PLAN.md" rel="noopener">Design plan</a>
+          <a href="https://github.com/lunanoir21/connectible-project/blob/main/RULES.md" rel="noopener">Engineering rules</a>
+        </div>
+      </div>
+    </div>
+    <div class="foot-legal">
+      <span>© <span id="year">2026</span> Connectible — built in the open · license TBD</span>
+      <span>no cloud · no accounts · no telemetry</span>
+    </div>
+  </div>
+</footer>
+
+<script>
+(function () {
+  "use strict";
+  document.body.classList.add("js");
+  document.getElementById("year").textContent = new Date().getFullYear();
+
+  var reduced = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
+
+  /* ----------------------------------------------- reveal on scroll */
+  var revealEls = document.querySelectorAll(".reveal");
+  if (!reduced && "IntersectionObserver" in window) {
+    var io = new IntersectionObserver(function (entries) {
+      entries.forEach(function (e) {
+        if (e.isIntersecting) { e.target.classList.add("in"); io.unobserve(e.target); }
+      });
+    }, { rootMargin: "0px 0px -8% 0px", threshold: 0.08 });
+    revealEls.forEach(function (el) { io.observe(el); });
+  } else {
+    revealEls.forEach(function (el) { el.classList.add("in"); });
+  }
+
+  /* -------------------------------------------------- copy buttons */
+  document.querySelectorAll(".copy-btn").forEach(function (btn) {
+    btn.addEventListener("click", function () {
+      var src = document.querySelector(btn.getAttribute("data-copy"));
+      if (!src || !navigator.clipboard) return;
+      var text = src.textContent.replace(/^\$ /gm, "");
+      navigator.clipboard.writeText(text).then(function () {
+        btn.textContent = "copied";
+        setTimeout(function () { btn.textContent = "copy"; }, 1600);
+      });
+    });
+  });
+
+  /* --------------------------------------------- pairing demo ------
+     Mirrors the real protocol: crypto-random 6-digit PIN, 30 s expiry,
+     three attempts, and timeout means a fresh Pair — never a retry. */
+  var PIN_TTL = 30;
+  var pinDisplay = document.getElementById("pin-display");
+  var pinTimer = document.getElementById("pin-timer");
+  var pinTimerFill = document.getElementById("pin-timer-fill");
+  var pinTimerLabel = document.getElementById("pin-timer-label");
+  var pinInput = document.getElementById("pin-input");
+  var pinField = document.getElementById("pin-field");
+  var pinConfirm = document.getElementById("pin-confirm");
+  var pairBtn = document.getElementById("pair-btn");
+  var attemptsEl = document.getElementById("attempts");
+  var logA = document.getElementById("log-a");
+  var logB = document.getElementById("log-b");
+  var paneA = document.getElementById("pane-a");
+  var paneB = document.getElementById("pane-b");
+
+  var pin = null, attempts = 0, deadline = 0, tick = null, done = false;
+
+  function randomPin() {
+    var buf = new Uint32Array(1);
+    if (window.crypto && crypto.getRandomValues) {
+      crypto.getRandomValues(buf);
+    } else {
+      buf[0] = Math.floor(Math.random() * 1e9);
+    }
+    return String(buf[0] % 1000000).padStart(6, "0");
+  }
+
+  function stopTick() { if (tick) { clearInterval(tick); tick = null; } }
+
+  function hidePinUi() {
+    pinDisplay.classList.remove("show");
+    pinTimer.classList.remove("show");
+    pinTimerLabel.classList.remove("show");
+    pinInput.classList.remove("show");
+    attemptsEl.classList.remove("show");
+  }
+
+  function reset() {
+    stopTick();
+    pin = null; attempts = 0; done = false;
+    paneA.classList.remove("live");
+    paneB.classList.remove("live");
+    hidePinUi();
+    pairBtn.style.display = "";
+    pinField.value = "";
+    logB.innerHTML = "advertising _connectible._tcp …";
+    logA.innerHTML = "peer discovered · tls 1.3 established";
+  }
+
+  function backToPair(logBHtml, logAHtml) {
+    stopTick();
+    pin = null;
+    hidePinUi();
+    paneB.classList.remove("live");
+    logB.innerHTML = logBHtml;
+    logA.innerHTML = logAHtml;
+    pairBtn.style.display = "";
+  }
+
+  function expire() {
+    if (done) return;
+    backToPair(
+      '<span class="err">ERROR_CODE_PAIRING_TIMEOUT</span> · pin expired',
+      "restart from Pair — ConfirmPin is never retried"
+    );
+  }
+
+  function invalidate() {
+    backToPair(
+      '<span class="err">pin invalidated</span> · 3 wrong attempts',
+      "restart from Pair to try again"
+    );
+  }
+
+  function startPairing() {
+    pin = randomPin();
+    attempts = 0; done = false;
+    deadline = Date.now() + PIN_TTL * 1000;
+
+    paneB.classList.add("live");
+    paneA.classList.add("live");
+    logB.innerHTML = "pair request received · pin generated";
+    logA.innerHTML = "PairResponse(accepted) ← · enter the pin shown on device-b";
+
+    pinDisplay.textContent = pin;
+    pinDisplay.classList.add("show");
+    pinTimer.classList.add("show");
+    pinTimerLabel.classList.add("show");
+    pairBtn.style.display = "none";
+    pinInput.classList.add("show");
+    attemptsEl.classList.add("show");
+    attemptsEl.textContent = "attempts remaining: 3";
+    pinField.value = "";
+    pinField.focus();
+
+    stopTick();
+    tick = setInterval(function () {
+      var left = Math.max(0, deadline - Date.now());
+      pinTimerFill.style.transform = "scaleX(" + (left / (PIN_TTL * 1000)) + ")";
+      pinTimerLabel.textContent = "expires in " + Math.ceil(left / 1000) + " s";
+      if (left <= 0) expire();
+    }, 100);
+  }
+
+  function confirmPin() {
+    if (pin === null) return;
+    var value = pinField.value.trim();
+    if (value.length !== 6) { pinField.focus(); return; }
+    if (value === pin) {
+      done = true;
+      stopTick();
+      hidePinUi();
+      logB.innerHTML = '<span class="ok">ConfirmPinResponse(verified) →</span><br>devices.db ← peer persisted';
+      logA.innerHTML = '<span class="ok">paired ✓</span> · SyncStream open — no pin needed next time';
+    } else {
+      attempts += 1;
+      pinField.value = "";
+      if (attempts >= 3) { invalidate(); return; }
+      attemptsEl.textContent = "attempts remaining: " + (3 - attempts) + " · verified=false";
+      pinField.focus();
+    }
+  }
+
+  pairBtn.addEventListener("click", startPairing);
+  pinConfirm.addEventListener("click", confirmPin);
+  pinField.addEventListener("input", function () {
+    pinField.value = pinField.value.replace(/\D/g, "").slice(0, 6);
+  });
+  pinField.addEventListener("keydown", function (e) {
+    if (e.key === "Enter") confirmPin();
+  });
+  document.getElementById("demo-reset").addEventListener("click", reset);
+})();
+</script>
+</body>
+</html>

@@ -1,0 +1,18 @@
+[Unit]
+Description=Connectible device-sync daemon
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/connectibled
+Restart=on-failure
+RestartSec=2
+# Generous headroom over RULES.md's <30MB idle-RSS target for active
+# transfers/streams; not a hard functional requirement, just a sane
+# ceiling so a leak degrades to an OOM-kill-and-restart rather than
+# eating the whole session's memory.
+MemoryMax=512M
+
+[Install]
+WantedBy=default.target

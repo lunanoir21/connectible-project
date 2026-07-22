@@ -1,0 +1,139 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Rust workspace = daemon + desktop/core (src-tauri is excluded from
+  # the workspace because it needs system webkit; it is built in the
+  # separate desktop-app job).
+  rust:
+    name: Rust (daemon + desktop core)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Format check
+        run: cargo fmt --all --check
+
+      - name: Clippy (deny warnings)
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
+  # Desktop React frontend: strict typecheck + component/unit tests.
+  desktop-frontend:
+    name: Desktop frontend (TS)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: desktop
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - run: npm ci
+      - name: Typecheck (strict)
+        run: npm run typecheck
+      - name: Test
+        run: npm test
+      - name: Build bundle
+        run: npx vite build
+
+  # Full Tauri desktop app build (needs system webkit2gtk-4.1).
+  desktop-app:
+    name: Desktop app (Tauri)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system deps (webkit, protoc)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            protobuf-compiler \
+            libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            patchelf
+
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: desktop/src-tauri
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+          cache-dependency-path: desktop/package-lock.json
+
+      - name: Build frontend
+        working-directory: desktop
+        run: |
+          npm ci
+          npx vite build
+
+      - name: Build Tauri shell
+        working-directory: desktop/src-tauri
+        run: cargo build --locked
+
+  # Mobile Flutter app: generate stubs, then static analysis.
+  mobile:
+    name: Mobile (Flutter)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: mobile
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install protoc
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Generate proto stubs
+        run: |
+          dart pub global activate protoc_plugin 21.1.2
+          export PATH="$PATH:$HOME/.pub-cache/bin"
+          ./tool/gen_proto.sh
+
+      - name: Pub get
+        run: flutter pub get
+
+      - name: Analyze
+        run: flutter analyze
+
+      # Default `flutter test` (pairing_manager_test.dart, widget_test.dart,
+      # crc32_test.dart, file_util_test.dart, reconnect_backoff_test.dart,
+      # integration/server_pairing_test.dart) is self-contained TLS-only
+      # and needs no external services. The RUN_DAEMON_INTEGRATION=1-gated
+      # daemon_integration_test.dart is intentionally NOT enabled here --
+      # it spawns the real Rust daemon binary, a separate CI concern.
+      - name: Test
+        run: flutter test

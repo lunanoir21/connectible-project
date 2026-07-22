@@ -1,0 +1,18 @@
+# Virtual workspace tying together the Rust crates that build in any
+# environment the daemon does. `desktop/src-tauri` is intentionally
+# EXCLUDED, not a member: it depends on system webkit2gtk-4.1 (GTK3),
+# which is not present everywhere, and keeping it out of the workspace
+# lets `cargo test` at the repo root run the daemon and the desktop
+# core (the parts with real logic and tests) without being blocked by
+# the webview toolchain. The Tauri shell still builds on its own via
+# `cargo build` inside desktop/src-tauri on a machine with the right
+# system libs (see desktop/README.md).
+[workspace]
+resolver = "2"
+members = [
+    "daemon",
+    "desktop/core",
+]
+exclude = [
+    "desktop/src-tauri",
+]

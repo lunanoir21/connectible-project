@@ -1,0 +1,13 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "Default capability for the Connectible main window: core APIs, native file-open dialog for choosing files to send and the received-files folder picker, clipboard write for the history panel's copy-back action, opening external links (Doctor panel's firewall doc link), and revealing the received-files folder in the OS file manager.",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "dialog:allow-open",
+    "clipboard-manager:allow-write-text",
+    "opener:allow-open-url",
+    "opener:allow-open-path"
+  ]
+}

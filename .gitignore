@@ -1,0 +1,35 @@
+# Rust
+/target
+**/target
+# Cargo.lock IS committed: this repo ships applications (daemon, desktop
+# shell), so a locked, reproducible dependency set is required and CI
+# builds with --locked.
+
+# Node / frontend
+desktop/node_modules
+desktop/dist
+
+# Tauri / generated
+desktop/src-tauri/gen
+
+# Flutter generated proto stubs (regenerated via mobile/tool/gen_proto.sh)
+mobile/lib/src/generated/*.dart
+# Flutter build output + scaffolded platform dirs
+mobile/.dart_tool
+mobile/build
+# Android (Gradle) build output + caches under the kept android/ project
+mobile/android/build
+mobile/android/app/build
+mobile/android/.gradle
+mobile/android/local.properties
+mobile/ios
+mobile/linux
+mobile/macos
+mobile/windows
+mobile/web
+mobile/.flutter-plugins
+mobile/.flutter-plugins-dependencies
+
+# Editor / OS
+*.swp
+.DS_Store
