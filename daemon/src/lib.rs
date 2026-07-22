@@ -51,7 +51,17 @@ pub async fn run(config: config::Config) -> anyhow::Result<()> {
     info!(device_id = %device_id, device_name = %config.device_name, "loaded local identity");
 
     let pool = db::init_pool(&config).await?;
-    let devices = db::DeviceRepository::new(pool);
+    let db_key = db::keys::load_or_create_db_key(&config).await?;
+    info!(source = db_key.source.as_str(), "db encryption key sourced");
+    let devices = db::DeviceRepository::new(pool.clone(), db_key.bytes);
+    let transfer_history = db::TransferHistoryRepository::new(pool);
+    // T-H4: re-encrypt any fingerprint pinned before this phase shipped.
+    // A no-op after the first startup post-upgrade.
+    match devices.migrate_plaintext_fingerprints().await {
+        Ok(0) => {}
+        Ok(n) => info!(migrated = n, "encrypted plaintext fingerprints from a pre-Phase-H database"),
+        Err(e) => warn!(error = %e, "fingerprint encryption migration failed; continuing with plaintext entries unmigrated"),
+    }
 
     let tls_config = tls::load_or_create_server_config(&config)?;
 
@@ -62,6 +72,15 @@ pub async fn run(config: config::Config) -> anyhow::Result<()> {
     let clipboard = clipboard_backend.map(|backend| Arc::new(ClipboardSync::new(backend)));
     let input_backend = input::detect_backend();
     let input = input_backend.map(|backend| Arc::new(InputDispatcher::new(backend)));
+
+    // T-X12: the T-309/T-310 toggles persist across restarts. A user who
+    // turned clipboard sync off should not silently find it back on after
+    // a reboot (a privacy-expectation break). Load once here and apply to
+    // both gates; missing/corrupt file -> both default on (see UiToggles).
+    let ui_toggles = config::load_ui_toggles(&config.data_dir);
+    if let Some(input) = &input {
+        input.set_enabled(ui_toggles.remote_input_enabled);
+    }
 
     let capabilities = identity::capability_list(clipboard.is_some(), input.is_some());
 
@@ -77,7 +96,7 @@ pub async fn run(config: config::Config) -> anyhow::Result<()> {
     let discovery_table = discovery::spawn_browser(mdns.clone(), device_id.clone())?;
 
     let peers = grpc::PeerRegistry::default();
-    let transfers = Arc::new(TransferManager::new(config.transfers_dir.clone()));
+    let transfers = Arc::new(TransferManager::new());
     let uploads = Arc::new(transfer::upload::UploadRegistry::new(
         config.transfers_dir.clone(),
     ));
@@ -87,12 +106,13 @@ pub async fn run(config: config::Config) -> anyhow::Result<()> {
     // in grpc::handle_frame. Lives here (not inside ClipboardSync
     // itself) so it is shared between the two independently of the
     // clipboard backend/module.
-    let clipboard_sync_enabled = Arc::new(AtomicBool::new(true));
+    let clipboard_sync_enabled = Arc::new(AtomicBool::new(ui_toggles.clipboard_sync_enabled));
 
     let service = ConnectibleService {
         config: config.clone(),
         local_device_id: device_id,
         devices,
+        transfer_history,
         pairing: Arc::new(pairing::PairingManager::default()),
         discovery: discovery_table,
         peers: peers.clone(),

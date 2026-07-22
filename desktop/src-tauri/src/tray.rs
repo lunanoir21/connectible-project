@@ -4,6 +4,19 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use crate::state::AppState;
 
+/// Handles to the tray menu's items, managed as Tauri state so the
+/// `update_tray` command (T-X14) can relabel them when the UI language
+/// changes and re-check the clipboard-sync box when that toggle is
+/// flipped from anywhere (Settings, the daemon, this tray). Without
+/// this, the labels were frozen in English and the checkbox only ever
+/// updated on a tray-initiated toggle.
+pub struct TrayHandles {
+    pub show: MenuItem<tauri::Wry>,
+    pub hide: MenuItem<tauri::Wry>,
+    pub clipboard_sync: CheckMenuItem<tauri::Wry>,
+    pub quit: MenuItem<tauri::Wry>,
+}
+
 /// Builds the system tray icon and menu (T-034): show/hide the main
 /// window, toggle clipboard sync (T-310), and quit. Closing the window
 /// hides it to tray rather than exiting (see the window close handler
@@ -33,6 +46,17 @@ pub fn build_tray(app: &AppHandle) -> tauri::Result<()> {
     )?;
     let quit = MenuItem::with_id(app, "quit", "Quit", true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show, &hide, &clipboard_sync, &quit])?;
+
+    // Keep the item handles so `update_tray` (T-X14) can relabel them on
+    // a language change and re-check the box on a Settings-side toggle.
+    // The English strings above are only the pre-frontend-ready defaults;
+    // the frontend calls `update_tray` on mount to localize them.
+    app.manage(TrayHandles {
+        show: show.clone(),
+        hide: hide.clone(),
+        clipboard_sync: clipboard_sync.clone(),
+        quit: quit.clone(),
+    });
 
     let clipboard_sync_item = clipboard_sync.clone();
     let mut builder = TrayIconBuilder::with_id("connectible-tray")

@@ -1,0 +1,54 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="760" height="400" viewBox="0 0 760 400" role="img" aria-label="Connectible architecture: Desktop (Tauri + React) and Mobile (Flutter) talk gRPC over TLS 1.3; mDNS is discovery-only; the desktop UI drives the connectibled Rust daemon over gRPC loopback.">
+  <style>
+    text { font-family: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, "Liberation Mono", monospace; }
+    .t    { fill: #e7e7ea; font-size: 15px; letter-spacing: 0.2px; }
+    .s    { fill: #8b8b92; font-size: 12px; }
+    .m    { fill: #a9a9b0; font-size: 12.5px; }
+    .f    { fill: #616168; font-size: 10.5px; letter-spacing: 0.3px; }
+    .node { fill: #131316; stroke: #2e2e33; }
+    .ln   { stroke: #4a4a52; stroke-width: 1.2; fill: none; }
+    .dash { stroke: #3f3f46; stroke-width: 1; stroke-dasharray: 3 6; fill: none; }
+  </style>
+
+  <rect x="0.5" y="0.5" width="759" height="399" rx="14" fill="#0b0b0c" stroke="#26262a"/>
+
+  <!-- mDNS discovery arc (dashed: discovery only, never the data path) -->
+  <path class="dash" d="M165,118 C205,56 555,56 595,118"/>
+  <text class="m" x="380" y="42" text-anchor="middle">mDNS  _connectible._tcp</text>
+  <text class="f" x="380" y="58" text-anchor="middle">discovery only - connections are direct to address:port</text>
+
+  <!-- Desktop node -->
+  <rect class="node" x="70" y="120" width="190" height="92" rx="10"/>
+  <text class="t" x="165" y="161" text-anchor="middle">Desktop</text>
+  <text class="s" x="165" y="184" text-anchor="middle">Tauri + React</text>
+
+  <!-- Mobile node -->
+  <rect class="node" x="500" y="120" width="190" height="92" rx="10"/>
+  <text class="t" x="595" y="161" text-anchor="middle">Mobile</text>
+  <text class="s" x="595" y="184" text-anchor="middle">Flutter</text>
+
+  <!-- LAN link: endpoint stars on the box edges, chevrons both ways -->
+  <circle cx="260" cy="166" r="2.6" fill="#cfcfd4"/>
+  <circle cx="500" cy="166" r="2.6" fill="#cfcfd4"/>
+  <line class="ln" x1="266" y1="166" x2="494" y2="166"/>
+  <path class="ln" d="M278,160 L268,166 L278,172"/>
+  <path class="ln" d="M482,160 L492,166 L482,172"/>
+  <text class="m" x="380" y="149" text-anchor="middle">gRPC / TLS 1.3</text>
+  <text class="s" x="380" y="192" text-anchor="middle">SyncStream</text>
+
+  <!-- Loopback link Desktop -> daemon -->
+  <circle cx="165" cy="212" r="2.6" fill="#cfcfd4"/>
+  <circle cx="165" cy="280" r="2.6" fill="#cfcfd4"/>
+  <line class="ln" x1="165" y1="218" x2="165" y2="274"/>
+  <text class="m" x="184" y="243">gRPC loopback</text>
+  <text class="f" x="184" y="259">desktop core (Rust)</text>
+
+  <!-- Daemon node -->
+  <rect class="node" x="70" y="280" width="190" height="76" rx="10"/>
+  <text class="t" x="165" y="313" text-anchor="middle">connectibled</text>
+  <text class="s" x="165" y="335" text-anchor="middle">Rust daemon</text>
+
+  <!-- Daemon stack -->
+  <text class="s" x="284" y="309">tokio, tonic, rustls</text>
+  <text class="s" x="284" y="329">mdns-sd, sqlx / SQLite</text>
+</svg>

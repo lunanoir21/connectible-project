@@ -8,33 +8,118 @@ import 'package:fixnum/fixnum.dart';
 import 'package:flutter/foundation.dart';
 import 'package:grpc/grpc.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/models.dart';
-import '../services/crc32.dart';
 import '../services/file_util.dart';
 import 'sync_connection.dart';
 import '../generated/connectible.pbgrpc.dart' as pb;
 
 const int _chunkSize = 65536;
 
-/// Mirrors the daemon's `MAX_CHUNK_RESEND_ATTEMPTS`
-/// (daemon/src/transfer/mod.rs) -- how many times a single corrupted
-/// offset may be re-requested (T-306) before the receiver gives up and
-/// fails the whole transfer, so a systematically broken link can't
-/// loop forever.
-const int _maxChunkResendAttempts = 3;
-
 /// Owns file transfer send/receive/resume (T-204). Depends only on the
 /// narrow [SyncConnection] interface (send frames, connectivity, active
 /// peer id for resumable transfer ids) rather than on [PairingModel]
 /// concretely.
 class FileTransferModel extends ChangeNotifier {
-  FileTransferModel({required SyncConnection connection})
-      : _connection = connection;
+  FileTransferModel({required SyncConnection connection, required SharedPreferences prefs})
+      : _connection = connection,
+        _prefs = prefs {
+    _loadHistory();
+  }
 
   final SyncConnection _connection;
+  final SharedPreferences _prefs;
 
   Map<String, TransferProgress> transfers = {};
+
+  // --- persisted history (Phase J) ----------------------------------------
+  // Mobile has no separate daemon process, so (unlike desktop) this model
+  // persists its own history directly, mirroring DeviceListModel's
+  // shared_preferences JSON-blob pattern rather than going through an RPC.
+
+  static const _historyPrefsKey = 'connectible.transfer_history';
+  /// Mirrors the daemon's own MAX_ROWS cap (Phase J, `db/history.rs`),
+  /// chosen smaller since a phone's storage/UI surface is more
+  /// constrained than desktop's.
+  static const _historyCap = 200;
+
+  List<TransferHistoryEntry> _history = const [];
+
+  /// Persisted history, most recent first (both directions). Read-only
+  /// view for `transfers_screen.dart`.
+  List<TransferHistoryEntry> get history => _history;
+
+  void _loadHistory() {
+    final raw = _prefs.getString(_historyPrefsKey);
+    if (raw == null || raw.isEmpty) return;
+    try {
+      final list = (jsonDecode(raw) as List).cast<Map<String, dynamic>>();
+      _history = list
+          .map((m) => TransferHistoryEntry(
+                transferId: m['transferId'] as String,
+                peerDeviceId: m['peerDeviceId'] as String? ?? '',
+                fileName: m['fileName'] as String,
+                totalBytes: (m['totalBytes'] as num?)?.toInt() ?? 0,
+                direction: m['direction'] == 'outgoing'
+                    ? TransferDirection.outgoing
+                    : TransferDirection.incoming,
+                status: m['status'] as String? ?? 'completed',
+                startedAtMs: (m['startedAtMs'] as num?)?.toInt() ?? 0,
+                finishedAtMs: (m['finishedAtMs'] as num?)?.toInt() ?? 0,
+                // Optional key (T-X5): blobs written before it existed
+                // simply load with no saved path.
+                localPath: m['localPath'] as String? ?? '',
+              ))
+          .toList(growable: false);
+    } catch (e) {
+      debugPrint('transfer history parse failed: $e');
+      _history = const [];
+    }
+  }
+
+  void _saveHistory() {
+    final json = jsonEncode(_history
+        .map((h) => {
+              'transferId': h.transferId,
+              'peerDeviceId': h.peerDeviceId,
+              'fileName': h.fileName,
+              'totalBytes': h.totalBytes,
+              'direction': h.direction == TransferDirection.outgoing ? 'outgoing' : 'incoming',
+              'status': h.status,
+              'startedAtMs': h.startedAtMs,
+              'finishedAtMs': h.finishedAtMs,
+              'localPath': h.localPath,
+            })
+        .toList(growable: false));
+    _prefs.setString(_historyPrefsKey, json);
+  }
+
+  /// Records one terminal transfer outcome, most-recent-first, capped at
+  /// [_historyCap] entries (T-J3's retention-cap counterpart on mobile).
+  void _recordHistory({
+    required String transferId,
+    required String fileName,
+    required int totalBytes,
+    required TransferDirection direction,
+    required String status,
+    required int startedAtMs,
+    String localPath = '',
+  }) {
+    final entry = TransferHistoryEntry(
+      transferId: transferId,
+      peerDeviceId: _connection.activePeerId ?? '',
+      fileName: fileName,
+      totalBytes: totalBytes,
+      direction: direction,
+      status: status,
+      startedAtMs: startedAtMs,
+      finishedAtMs: DateTime.now().millisecondsSinceEpoch,
+      localPath: localPath,
+    );
+    _history = [entry, ..._history].take(_historyCap).toList(growable: false);
+    _saveHistory();
+  }
 
   // --- outgoing ----------------------------------------------------------
 
@@ -42,16 +127,7 @@ class FileTransferModel extends ChangeNotifier {
   /// loop checks this and stops early.
   final Set<String> _canceledOutgoing = {};
 
-  /// Local file path + size for every outgoing transfer currently
-  /// in-flight, keyed by transfer_id, so [handleFileChunkRequest] (T-306)
-  /// can reopen the file and resend one specific chunk without needing
-  /// its own handle into the streaming loop's local `raf`. Populated at
-  /// the start of [sendFile], removed when it finishes/fails/cancels.
-  final Map<String, _OutgoingSend> _activeSends = {};
-
   // --- incoming ------------------------------------------------------------
-
-  final Map<String, _IncomingTransfer> _incoming = {};
 
   /// On-disk path of each completed, hash-verified incoming file, keyed
   /// by transfer_id. Received files land in an app-private directory the
@@ -62,21 +138,22 @@ class FileTransferModel extends ChangeNotifier {
 
   /// The saved on-disk path of a completed incoming transfer, or null if
   /// it never completed (or was a send). Used by the transfers screen's
-  /// "Save to..." action.
-  String? incomingFilePath(String transferId) => _incomingFinalPaths[transferId];
-
-  /// Serializes incoming-file disk writes in frame-arrival order (the
-  /// inbound stream callback is sync, so async I/O must be chained).
-  Future<void> _ioChain = Future<void>.value();
-
-  /// Lets tests deterministically wait for every `handleFileTransferStart`/
-  /// `handleFileChunk` call queued so far to finish its disk I/O, instead
-  /// of guessing with `pumpEventQueue()` -- which pumps a fixed number of
-  /// microtask turns and is not guaranteed to outlast real (if small) file
-  /// I/O latency, especially across the two chained operations a single
-  /// incoming chunk triggers.
-  @visibleForTesting
-  Future<void> get pendingIoForTests => _ioChain;
+  /// "Save to..." action. Falls back to the persisted history entry's
+  /// [TransferHistoryEntry.localPath] (T-X5) so a file received before
+  /// the last app restart is still reachable; the caller keeps its
+  /// exists-on-disk check for genuinely deleted files.
+  String? incomingFilePath(String transferId) {
+    final live = _incomingFinalPaths[transferId];
+    if (live != null) return live;
+    for (final h in _history) {
+      if (h.transferId == transferId &&
+          h.direction == TransferDirection.incoming &&
+          h.localPath.isNotEmpty) {
+        return h.localPath;
+      }
+    }
+    return null;
+  }
 
   /// Requests that an in-flight outgoing transfer stop. The streaming
   /// send loop notices on its next chunk and marks the transfer failed.
@@ -113,15 +190,45 @@ class FileTransferModel extends ChangeNotifier {
     final client = _connection.uploadClient;
     if (client == null) return; // no outgoing session to a peer
     final file = File(path);
-    final size = await file.length();
     final name = path.split(Platform.pathSeparator).last;
-    final mtime = await file.lastModified();
-    // Deterministic (not random) so retrying the *same* file to the
-    // *same* peer after a dropped connection reuses the file_id the
-    // receiver keyed its partial under, which is what makes resume work.
-    final fileId = _deterministicTransferId(path, size, mtime);
-    // Streaming whole-file SHA-256 (constant memory) declared up front.
-    final fileHash = await _hashFile(file);
+    final startedAtMs = DateTime.now().millisecondsSinceEpoch;
+
+    // File-reading steps (size/mtime/whole-file hash) can throw just as
+    // easily as the RPC calls below (e.g. the picked file was deleted or
+    // became unreadable between pick and send), so they get the same
+    // try/catch + failed-transfer emission instead of propagating
+    // uncaught and leaving the user with no error row at all.
+    int size;
+    DateTime mtime;
+    String fileId;
+    String fileHash;
+    try {
+      size = await file.length();
+      mtime = await file.lastModified();
+      // Deterministic (not random) so retrying the *same* file to the
+      // *same* peer after a dropped connection reuses the file_id the
+      // receiver keyed its partial under, which is what makes resume work.
+      fileId = _deterministicTransferId(path, size, mtime);
+      // Streaming whole-file SHA-256 (constant memory) declared up front.
+      fileHash = await _hashFile(file);
+    } catch (e) {
+      debugPrint('sendFile: failed to read $path: $e');
+      // No real size/mtime available, so the id can't be the usual
+      // resumable one -- this file was never opened, so there is nothing
+      // to resume anyway. Still stable enough per path to dedupe repeat
+      // taps on the same broken file into one row instead of piling up.
+      final fallbackId = sha256.convert(utf8.encode('unreadable|$path')).toString().substring(0, 32);
+      _emitOutgoing(fallbackId, name, 0, 0, failed: true);
+      _recordHistory(
+        transferId: fallbackId,
+        fileName: name,
+        totalBytes: 0,
+        direction: TransferDirection.outgoing,
+        status: 'failed',
+        startedAtMs: startedAtMs,
+      );
+      return;
+    }
     _emitOutgoing(fileId, name, 0, size);
 
     // Step 1: PrepareUpload -- declare the file, learn accept + resume.
@@ -143,6 +250,14 @@ class FileTransferModel extends ChangeNotifier {
     } catch (e) {
       debugPrint('prepareUpload failed for $fileId: $e');
       _emitOutgoing(fileId, name, 0, size, failed: true);
+      _recordHistory(
+        transferId: fileId,
+        fileName: name,
+        totalBytes: size,
+        direction: TransferDirection.outgoing,
+        status: 'failed',
+        startedAtMs: startedAtMs,
+      );
       return;
     }
 
@@ -152,6 +267,14 @@ class FileTransferModel extends ChangeNotifier {
     );
     if (!offer.accepted) {
       _emitOutgoing(fileId, name, 0, size, failed: true);
+      _recordHistory(
+        transferId: fileId,
+        fileName: name,
+        totalBytes: size,
+        direction: TransferDirection.outgoing,
+        status: 'failed',
+        startedAtMs: startedAtMs,
+      );
       return;
     }
     final resume = offer.resumeOffsetBytes.toInt().clamp(0, size).toInt();
@@ -190,56 +313,50 @@ class FileTransferModel extends ChangeNotifier {
       final result = await client.uploadFile(body());
       if (result.completed && result.hashOk) {
         _emitOutgoing(fileId, name, size, size, completed: true);
+        _recordHistory(
+          transferId: fileId,
+          fileName: name,
+          totalBytes: size,
+          direction: TransferDirection.outgoing,
+          status: 'completed',
+          startedAtMs: startedAtMs,
+        );
       } else if (_canceledOutgoing.contains(fileId)) {
         _emitOutgoing(fileId, name, result.bytesReceived.toInt(), size,
             failed: true, canceled: true);
+        _recordHistory(
+          transferId: fileId,
+          fileName: name,
+          totalBytes: size,
+          direction: TransferDirection.outgoing,
+          status: 'canceled',
+          startedAtMs: startedAtMs,
+        );
       } else {
         _emitOutgoing(fileId, name, result.bytesReceived.toInt(), size,
             failed: true);
+        _recordHistory(
+          transferId: fileId,
+          fileName: name,
+          totalBytes: size,
+          direction: TransferDirection.outgoing,
+          status: 'failed',
+          startedAtMs: startedAtMs,
+        );
       }
     } catch (e) {
       debugPrint('uploadFile failed for $fileId: $e');
       _emitOutgoing(fileId, name, resume, size, failed: true);
+      _recordHistory(
+        transferId: fileId,
+        fileName: name,
+        totalBytes: size,
+        direction: TransferDirection.outgoing,
+        status: 'failed',
+        startedAtMs: startedAtMs,
+      );
     } finally {
       _canceledOutgoing.remove(fileId);
-    }
-  }
-
-  /// Called by [PairingModel] when an inbound `SyncFrame` carries a
-  /// `FileChunkRequest` (T-306): the peer's CRC32 check failed on one
-  /// chunk of a transfer this device is sending, so it wants just that
-  /// offset resent rather than the whole transfer restarted. Only
-  /// meaningful while [sendFile] for this transfer_id is still running
-  /// (or, for a transfer that already finished sending every chunk, if
-  /// the request arrives before [_activeSends] was cleared -- see
-  /// `sendFile`'s `finally`); an unknown transfer_id is silently
-  /// ignored, mirroring the daemon's `note_corrupt_chunk` returning
-  /// `false` for a transfer it no longer knows about.
-  Future<void> handleFileChunkRequest(pb.FileChunkRequest request) async {
-    final send = _activeSends[request.transferId];
-    if (send == null) return;
-    final offset = request.offsetBytes.toInt();
-    try {
-      final raf = await File(send.path).open(mode: FileMode.read);
-      try {
-        await raf.setPosition(offset);
-        final chunk = await raf.read(_chunkSize);
-        if (chunk.isEmpty) return;
-        final isLast = offset + chunk.length >= send.totalBytes;
-        _connection.sendFrame(pb.SyncFrame(
-          fileChunk: pb.FileChunk(
-            transferId: request.transferId,
-            offsetBytes: Int64(offset),
-            data: chunk,
-            isLast: isLast,
-            chunkChecksum: Crc32.compute(chunk),
-          ),
-        ));
-      } finally {
-        await raf.close();
-      }
-    } catch (e) {
-      debugPrint('chunk resend failed for ${request.transferId}@$offset: $e');
     }
   }
 
@@ -276,196 +393,10 @@ class FileTransferModel extends ChangeNotifier {
     return digest!.toString();
   }
 
-  // --- incoming file transfers ---------------------------------------------
-
-  /// Called by [PairingModel] when an inbound `SyncFrame` carries a
-  /// `FileTransferStart`.
-  void handleFileTransferStart(pb.FileTransferStart start) {
-    _enqueueIo(() => _beginIncoming(start));
-  }
-
-  /// Called by [PairingModel] when an inbound `SyncFrame` carries a
-  /// `FileChunk`.
-  void handleFileChunk(pb.FileChunk chunk) {
-    _enqueueIo(() => _writeIncoming(chunk));
-  }
-
-  void _enqueueIo(Future<void> Function() op) {
-    _ioChain = _ioChain.then((_) => op()).catchError((Object e) {
-      debugPrint('incoming file io error: $e');
-    });
-  }
-
-  Future<void> _beginIncoming(pb.FileTransferStart start) async {
-    final baseDir = await getApplicationDocumentsDirectory();
-    final dir = Directory('${baseDir.path}/received');
-    await dir.create(recursive: true);
-    // Written to a transfer_id-keyed partial path, not the peer-supplied
-    // file name directly -- two concurrent/sequential incoming transfers
-    // sharing a file name must not overwrite each other's bytes (T-108).
-    // The collision-safe user-visible name is only assigned once the
-    // transfer completes and is hash-verified, in _writeIncoming.
-    final file = File('${dir.path}/${partialFileName(start.transferId)}');
-    // FileMode.append (not .write) so a resumed transfer_id (T-025)
-    // keeps whatever bytes are already on disk from a prior, dropped
-    // attempt instead of truncating them away -- re-sent chunks at
-    // earlier offsets are safe no-op overwrites via setPosition() in
-    // _writeIncoming, not data loss. Mirrors the daemon's
-    // TransferManager::begin (daemon/src/transfer/mod.rs).
-    final raf = await file.open(mode: FileMode.append);
-    final resumeOffset = start.resumeOffsetBytes
-        .toInt()
-        .clamp(0, start.fileSizeBytes.toInt())
-        .toInt();
-    _incoming[start.transferId] = _IncomingTransfer(
-      transferId: start.transferId,
-      fileName: start.fileName,
-      path: file.path,
-      totalBytes: start.fileSizeBytes.toInt(),
-      fileHash: start.fileHash,
-      raf: raf,
-    )..received = resumeOffset;
-    _emitIncoming(start.transferId, resumeOffset);
-  }
-
-  Future<void> _writeIncoming(pb.FileChunk chunk) async {
-    final t = _incoming[chunk.transferId];
-    if (t == null) return;
-    final offset = chunk.offsetBytes.toInt();
-    // Reject a corrupted chunk up front (cheap CRC32) before writing it.
-    // Rather than failing the whole transfer immediately (T-306), ask
-    // the sender to resend just this offset, up to
-    // _maxChunkResendAttempts times per offset -- mirrors the daemon's
-    // TransferManager::note_corrupt_chunk.
-    if (Crc32.compute(chunk.data) != chunk.chunkChecksum) {
-      final attempts = (t.corruptAttempts[offset] ?? 0) + 1;
-      t.corruptAttempts[offset] = attempts;
-      if (attempts > _maxChunkResendAttempts) {
-        await _failIncoming(t);
-        return;
-      }
-      t.pendingResendOffsets.add(offset);
-      _connection.sendFrame(pb.SyncFrame(
-        fileChunkRequest: pb.FileChunkRequest(
-          transferId: chunk.transferId,
-          offsetBytes: chunk.offsetBytes,
-        ),
-      ));
-      return;
-    }
-    await t.raf.setPosition(offset);
-    await t.raf.writeFrom(chunk.data);
-    // High-water mark, not last-write-wins (T-306): a resend can arrive
-    // *after* a later chunk was already written (e.g. the last chunk's
-    // CRC32 passes and gets written while an earlier offset is still
-    // pending a fix), so a plain assignment here would regress progress
-    // back down to the resent offset's end instead of reflecting how
-    // much of the file is actually down. Mirrors the daemon's
-    // `TransferManager::record_progress` (daemon/src/transfer/mod.rs),
-    // which folds each write into `bytes_written.max(position)`.
-    t.received = math.max(t.received, offset + chunk.data.length);
-    // This offset (if it had previously failed CRC32 and was pending a
-    // resend) is now correctly rewritten.
-    t.pendingResendOffsets.remove(offset);
-    if (chunk.isLast) {
-      t.finalizePending = true;
-    }
-
-    if (t.finalizePending && t.pendingResendOffsets.isEmpty) {
-      await t.raf.close();
-      final ok = await _verifyWholeFile(t);
-      if (ok) {
-        await _finalizeIncoming(t);
-      }
-      _incoming.remove(chunk.transferId);
-      _emitIncoming(t.transferId, t.received,
-          completed: ok, failed: !ok, transfer: t);
-    } else {
-      _emitIncoming(t.transferId, t.received, transfer: t);
-    }
-  }
-
-  Future<bool> _verifyWholeFile(_IncomingTransfer t) async {
-    if (t.fileHash.isEmpty) return true;
-    try {
-      final bytes = await File(t.path).readAsBytes();
-      return sha256.convert(bytes).toString() == t.fileHash;
-    } catch (e) {
-      debugPrint('incoming file verify failed for ${t.path}: $e');
-      return false;
-    }
-  }
-
-  /// Renames a completed, hash-verified transfer's partial file (written
-  /// at a transfer_id-keyed path, see [_beginIncoming]) to its final,
-  /// user-visible name -- disambiguated against whatever else is already
-  /// in the received/ directory so it can never silently overwrite an
-  /// unrelated file that happens to share a name (T-108).
-  Future<void> _finalizeIncoming(_IncomingTransfer t) async {
-    final partial = File(t.path);
-    final dir = partial.parent;
-    final existing = <String>{};
-    try {
-      await for (final entity in dir.list()) {
-        if (entity is File) {
-          existing.add(entity.path.split(Platform.pathSeparator).last);
-        }
-      }
-    } catch (e) {
-      debugPrint('incoming file finalize: could not list ${dir.path}: $e');
-    }
-    final finalName =
-        uniqueFileName(existing, safeReceivedFileName(t.fileName));
-    final finalPath = '${dir.path}/$finalName';
-    try {
-      await partial.rename(finalPath);
-      // Remembered so the UI's "Save to..." action can copy this file
-      // out of the app-private received/ dir to a user-chosen location.
-      _incomingFinalPaths[t.transferId] = finalPath;
-    } catch (e) {
-      debugPrint('incoming file finalize: rename failed for ${t.path}: $e');
-    }
-  }
-
-  Future<void> _failIncoming(_IncomingTransfer t) async {
-    try {
-      await t.raf.close();
-    } catch (e) {
-      debugPrint('incoming file fail: close errored for ${t.path}: $e');
-    }
-    _incoming.remove(t.transferId);
-    _emitIncoming(t.transferId, t.received, failed: true, transfer: t);
-  }
-
-  void _emitIncoming(
-    String id,
-    int received, {
-    bool completed = false,
-    bool failed = false,
-    _IncomingTransfer? transfer,
-  }) {
-    final t = transfer ?? _incoming[id];
-    if (t == null) return;
-    transfers = {
-      ...transfers,
-      id: TransferProgress(
-        transferId: id,
-        fileName: t.fileName,
-        bytesTransferred: received,
-        totalBytes: t.totalBytes,
-        direction: TransferDirection.incoming,
-        completed: completed,
-        failed: failed,
-      ),
-    };
-    notifyListeners();
-  }
-
-  // --- dedicated upload receive (PrepareUpload + UploadFile) -------------
+  // --- incoming file transfers (PrepareUpload + UploadFile) --------------
   // LocalSend-style path: bytes arrive on their own client-streaming RPC
   // (not the SyncStream), written straight to disk while a streaming
-  // SHA-256 is folded -- never buffering the whole file in RAM (the OOM
-  // fix vs `_verifyWholeFile`'s readAsBytes on the old chunk path).
+  // SHA-256 is folded -- never buffers the whole file in RAM.
 
   /// Live upload tickets minted by [handlePrepareUpload], keyed by token.
   final Map<String, _UploadTicket> _uploadTickets = {};
@@ -521,6 +452,11 @@ class FileTransferModel extends ChangeNotifier {
     final hashOut = ChunkedConversionSink<Digest>.withCallback(
         (digests) => digestResult = digests.single);
     var lastEmit = DateTime.fromMillisecondsSinceEpoch(0);
+    // Captured when the header is processed (not when PrepareUpload
+    // originally minted the ticket), same convention the daemon's own
+    // upload_file handler uses -- a resumed transfer's history entry
+    // reflects the last attempt that actually finished it.
+    final startedAtMs = DateTime.now().millisecondsSinceEpoch;
 
     await for (final part in parts) {
       if (part.hasHeader()) {
@@ -594,6 +530,14 @@ class FileTransferModel extends ChangeNotifier {
       }
       _uploadTickets.remove(token);
       _emitUpload(ticket, received, completed: false, failed: true);
+      _recordHistory(
+        transferId: ticket.fileId,
+        fileName: ticket.fileName,
+        totalBytes: ticket.totalBytes,
+        direction: TransferDirection.incoming,
+        status: 'failed',
+        startedAtMs: startedAtMs,
+      );
       return pb.UploadFileResult(
           fileId: ticket.fileId,
           completed: false,
@@ -605,6 +549,17 @@ class FileTransferModel extends ChangeNotifier {
     _incomingFinalPaths[ticket.fileId] = finalPath;
     _uploadTickets.remove(token);
     _emitUpload(ticket, received, completed: true, failed: false);
+    _recordHistory(
+      transferId: ticket.fileId,
+      fileName: ticket.fileName,
+      totalBytes: ticket.totalBytes,
+      direction: TransferDirection.incoming,
+      status: 'completed',
+      startedAtMs: startedAtMs,
+      // T-X5: persist where the finalized file landed so "Save to..."
+      // still resolves it after an app restart.
+      localPath: finalPath,
+    );
     return pb.UploadFileResult(
         fileId: ticket.fileId,
         completed: true,
@@ -654,14 +609,6 @@ class FileTransferModel extends ChangeNotifier {
         .map((b) => b.toRadixString(16).padLeft(2, '0'))
         .join();
   }
-
-  @override
-  void dispose() {
-    for (final t in _incoming.values) {
-      unawaited(t.raf.close());
-    }
-    super.dispose();
-  }
 }
 
 /// A live, accepted upload offer between `PrepareUpload` and the matching
@@ -684,50 +631,3 @@ class _UploadTicket {
   final String expectedHash;
 }
 
-/// In-progress receive of a file pushed from a paired device. Writes go
-/// straight to disk (via [raf]) so large files never have to be buffered
-/// in memory.
-class _IncomingTransfer {
-  _IncomingTransfer({
-    required this.transferId,
-    required this.fileName,
-    required this.path,
-    required this.totalBytes,
-    required this.fileHash,
-    required this.raf,
-  });
-
-  final String transferId;
-  final String fileName;
-  final String path;
-  final int totalBytes;
-  final String fileHash;
-  final RandomAccessFile raf;
-  int received = 0;
-
-  /// Offsets that failed CRC32 and have a `FileChunkRequest` resend
-  /// in flight (T-306). Finalizing on a bare `isLast` flag while this
-  /// is non-empty would race a still-corrupt byte range still being
-  /// fixed up, so [FileTransferModel._writeIncoming] gates finalize on
-  /// this being empty too -- mirrors the daemon's
-  /// `TransferMeta::pending_resend_offsets`.
-  final Set<int> pendingResendOffsets = {};
-
-  /// How many times a resend has been requested for each offset that
-  /// has ever failed CRC32, bounded by [_maxChunkResendAttempts].
-  final Map<int, int> corruptAttempts = {};
-
-  /// Set once the `isLast` chunk has been seen; finalize only happens
-  /// once this is true *and* [pendingResendOffsets] is empty.
-  bool finalizePending = false;
-}
-
-/// Local source for an outgoing transfer still in flight, kept around
-/// so [FileTransferModel.handleFileChunkRequest] (T-306) can reopen the
-/// file and resend one specific chunk on demand.
-class _OutgoingSend {
-  _OutgoingSend({required this.path, required this.totalBytes});
-
-  final String path;
-  final int totalBytes;
-}

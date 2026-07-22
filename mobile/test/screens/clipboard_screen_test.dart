@@ -71,9 +71,6 @@ void main() {
   PairingModel buildPairing(DeviceListModel deviceList) => PairingModel(
         deviceList: deviceList,
         onClipboardFrame: (_) {},
-        onFileTransferStart: (_) {},
-        onFileChunk: (_) {},
-        onFileChunkRequest: (_) {},
         pairableEnabled: false,
       );
 

@@ -39,14 +39,11 @@ List<SingleChildWidget> buildAppStateProviders(
     autoMonitor: clipboardAutoMonitor,
     autoApply: clipboardAutoApply,
   );
-  final fileTransfer =
-      FileTransferModel(connection: _LazyConnection(() => pairing));
+  final fileTransfer = FileTransferModel(
+      connection: _LazyConnection(() => pairing), prefs: prefs);
   pairing = PairingModel(
     deviceList: deviceList,
     onClipboardFrame: clipboard.handleInbound,
-    onFileTransferStart: fileTransfer.handleFileTransferStart,
-    onFileChunk: fileTransfer.handleFileChunk,
-    onFileChunkRequest: fileTransfer.handleFileChunkRequest,
     onPrepareUpload: fileTransfer.handlePrepareUpload,
     onUploadFile: fileTransfer.handleUploadFile,
     pairableEnabled: pairableEnabled,

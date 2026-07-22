@@ -18,7 +18,9 @@ use std::time::Duration;
 
 use connectibled::config::Config;
 use connectibled::proto::connectible::v1::connectible_client::ConnectibleClient;
-use connectibled::proto::connectible::v1::Identity;
+use connectibled::proto::connectible::v1::{
+    local_event, ConfirmPinRequest, Identity, LocalEventsRequest, PairRequest,
+};
 use tokio::net::TcpStream;
 use tokio::sync::Mutex;
 use tonic::transport::{Certificate, Channel, ClientTlsConfig};
@@ -144,6 +146,48 @@ fn unique_device_name() -> String {
     static COUNTER: AtomicU64 = AtomicU64::new(0);
     let n = COUNTER.fetch_add(1, Ordering::Relaxed);
     format!("Smoke-Test-Daemon-{n}")
+}
+
+/// Runs the full pair + PIN-confirm handshake over real TLS so a device
+/// is persisted as paired, mirroring what a phone/desktop does before it
+/// can appear in `list_devices` -- or, since SyncStream now requires the
+/// sender to already be paired, before it can push any frame past
+/// Identity at all.
+pub async fn pair_device(config: &Config, port: u16, device_id: &str, name: &str) {
+    let mut ui = connect_client(config, port).await;
+    let mut requester = connect_client(config, port).await;
+
+    let mut events = ui
+        .subscribe_local_events(LocalEventsRequest {})
+        .await
+        .expect("subscribe local events")
+        .into_inner();
+
+    requester
+        .pair(PairRequest {
+            requester: Some(test_identity(device_id, name)),
+        })
+        .await
+        .expect("pair rpc");
+
+    let event = tokio::time::timeout(Duration::from_secs(3), events.message())
+        .await
+        .expect("pairing event within 3s")
+        .expect("stream healthy")
+        .expect("stream not ended");
+    let Some(local_event::Event::PairingRequested(prompt)) = event.event else {
+        panic!("expected PairingRequested");
+    };
+
+    let confirm = requester
+        .confirm_pin(ConfirmPinRequest {
+            device_id: device_id.to_string(),
+            pin_code: prompt.pin_code,
+        })
+        .await
+        .expect("confirm_pin rpc")
+        .into_inner();
+    assert!(confirm.verified, "device must pair");
 }
 
 pub async fn connect_client(config: &Config, port: u16) -> ConnectibleClient<Channel> {

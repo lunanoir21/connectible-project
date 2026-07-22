@@ -1,8 +1,9 @@
 import { useState } from "react";
 import { Icon } from "./Icon";
 import { useT } from "../i18n";
-import { ipc } from "../lib/ipc";
+import { ipc, type IpcError } from "../lib/ipc";
 import { errorCodeMessage } from "../lib/errors";
+import { ErrorState } from "./ErrorState";
 
 interface RemoteInputPanelProps {
   capabilities: string[];
@@ -18,6 +19,11 @@ interface RemoteInputPanelProps {
   // a real, permanent-sounding claim -- during the loading window
   // instead of a neutral "checking" state.
   loading?: boolean;
+  // Set when the initial GetLocalState fetch itself failed (T-601),
+  // distinct from `loading` -- without this, a failed fetch left
+  // `capabilities` at its `[]` default and this panel showed a
+  // permanent-sounding "Unavailable" instead of a real error.
+  loadError?: IpcError | null;
 }
 
 /// Placeholder for the status card shown before the daemon's first
@@ -44,7 +50,7 @@ function RemoteInputStatusSkeleton() {
 /// (a paired phone drives this machine), so this shows whether this
 /// computer can accept remote input, which backend is active, and lets
 /// the user turn dispatch on/off without disconnecting anything (T-309).
-export function RemoteInputPanel({ capabilities, enabled, onRefresh, loading }: RemoteInputPanelProps) {
+export function RemoteInputPanel({ capabilities, enabled, onRefresh, loading, loadError }: RemoteInputPanelProps) {
   const t = useT();
   const available = capabilities.includes("remote_input");
   const [toggling, setToggling] = useState(false);
@@ -75,6 +81,13 @@ export function RemoteInputPanel({ capabilities, enabled, onRefresh, loading }: 
 
       {loading ? (
         <RemoteInputStatusSkeleton />
+      ) : loadError ? (
+        <ErrorState
+          title={t("errors.loadFailedTitle")}
+          message={errorCodeMessage(loadError.code, t)}
+          retryLabel={t("common.refresh")}
+          onRetry={onRefresh}
+        />
       ) : (
         <div className="card p-5">
           <div className="flex items-start gap-4">

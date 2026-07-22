@@ -1,4 +1,4 @@
-import { useState, useCallback, useMemo, useEffect } from "react";
+import { useState, useCallback, useEffect, memo } from "react";
 import { ipc, type IpcError } from "../lib/ipc";
 import type { Device, LocalAddresses, NearbyDevice } from "../lib/types";
 import { formatRelativeTime } from "../lib/format";
@@ -6,7 +6,7 @@ import { errorCodeMessage } from "../lib/errors";
 import { ErrorState } from "./ErrorState";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { Icon, type IconName } from "./Icon";
-import { useT, type Translate } from "../i18n";
+import { useT, useI18n, type Translate } from "../i18n";
 import type { PanelId } from "./Sidebar";
 
 interface HomePanelProps {
@@ -129,6 +129,7 @@ export function HomePanel({ deviceName, devices, nearby, onPairStarted, onNaviga
   }, [onRefresh, t]);
 
   const handleForget = useCallback(async (device: Device) => {
+    if (!window.confirm(t("menu.forgetConfirm"))) return;
     setForgettingId(device.deviceId);
     setError(null);
     const result = await ipc.forgetDevice(device.deviceId);
@@ -221,23 +222,6 @@ export function HomePanel({ deviceName, devices, nearby, onPairStarted, onNaviga
           </div>
         ) : (
           <>
-            <Constellation
-              deviceName={deviceName}
-              devices={devices}
-              pairable={visiblePairable}
-              pairingId={pairingId}
-              loading={loading}
-              onPair={startPair}
-              onShowInfo={setInfo}
-              t={t}
-            />
-
-            {hiddenNearby > 0 && (
-              <p className="mt-1 text-center text-xs text-ink-faint" data-testid="home-nearby-more">
-                {t("home.nearbyMore", { count: hiddenNearby })}
-              </p>
-            )}
-
             <StatusStrip
               devices={devices}
               onlineCount={onlineDevices.length}
@@ -245,8 +229,27 @@ export function HomePanel({ deviceName, devices, nearby, onPairStarted, onNaviga
               t={t}
             />
 
-            <div className="mx-auto mt-7 w-full max-w-[560px]">
+            <div className="mx-auto mt-6 w-full max-w-[560px]">
               <QuickActions actions={quickActions} />
+            </div>
+
+            <div className="mx-auto mt-7 w-full max-w-[560px]">
+              <HomeDeviceList
+                deviceName={deviceName}
+                devices={devices}
+                pairable={visiblePairable}
+                pairingId={pairingId}
+                loading={loading}
+                onPair={startPair}
+                onShowInfo={setInfo}
+                t={t}
+              />
+
+              {hiddenNearby > 0 && (
+                <p className="mt-2 text-center text-xs text-ink-faint" data-testid="home-nearby-more">
+                  {t("home.nearbyMore", { count: hiddenNearby })}
+                </p>
+              )}
             </div>
           </>
         )}
@@ -270,102 +273,14 @@ export function HomePanel({ deviceName, devices, nearby, onPairStarted, onNaviga
   );
 }
 
-// ===== Constellation =====
-// The home's signature. This device sits at the center; every peer is a
-// star held on an orbit by a tie back to you. State is legible in the
-// structure itself: paired peers ride the inner orbit, nearby-but-not-
-// paired ones the looser outer orbit. The tie carries the live/dead
-// reading -- a solid welded line and a lit star for an online peer, a
-// thin line and a hollow star when it's offline, a dashed detached tie
-// for a device merely in range. Nothing here is a flat list; the roster
-// *is* the picture of what you're connected to.
+// ===== Device list =====
+// The home's device roster, replacing the former constellation/radar
+// view (T-2.4): this device's own row, then a "Paired" section, then a
+// "Nearby" section for unpaired mDNS advertisers -- same grouped-card,
+// hairline-row language as Settings/Devices rather than a bespoke
+// layout. Paired rows open the info dialog; nearby rows pair directly.
 
-const VB_W = 760;
-const VB_H = 480;
-const CX = 380;
-const CY = 232;
-const RING_INNER = 140; // paired orbit
-const RING_OUTER = 196; // nearby orbit
-const NODE_R = 9;
-const CENTER_R = 30;
-
-// Stable per-device angular/radial jitter so a given peer always lands
-// in the same spot instead of jumping between renders -- the layout must
-// read as a fixed sky, not a reshuffle on every poll. FNV-1a hash.
-function hashSeed(s: string): number {
-  let h = 2166136261;
-  for (let i = 0; i < s.length; i++) {
-    h ^= s.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  return h >>> 0;
-}
-
-type StarKind = "online" | "offline" | "nearby";
-
-interface Star {
-  id: string;
-  name: string;
-  kind: StarKind;
-  device: Device | null;
-  nearby: NearbyDevice | null;
-  x: number;
-  y: number;
-  len: number;
-  index: number;
-}
-
-function placeGroup<T extends { deviceId: string }>(
-  items: T[],
-  ring: number,
-  startDeg: number,
-  make: (item: T, x: number, y: number, len: number, index: number) => Star,
-  indexOffset: number,
-): Star[] {
-  const n = items.length;
-  return items.map((item, i) => {
-    const step = n > 0 ? 360 / n : 0;
-    // A lone peer hangs straight up from center -- a clean vertical tie
-    // reads better than an off-axis one.
-    const base = n === 1 ? -90 : startDeg + i * step;
-    const seed = hashSeed(item.deviceId);
-    const spread = n > 4 ? 8 : 15;
-    const jitterA = ((seed % 1000) / 1000 - 0.5) * spread;
-    const jitterR = (((seed >> 10) % 1000) / 1000 - 0.5) * 18;
-    const ang = ((base + jitterA) * Math.PI) / 180;
-    const rr = ring + jitterR;
-    const x = CX + rr * Math.cos(ang);
-    const y = CY + rr * Math.sin(ang);
-    const len = Math.hypot(x - CX, y - CY);
-    return make(item, x, y, len, indexOffset + i);
-  });
-}
-
-// A fixed, deterministic scatter of faint background stars, generated
-// once at module load (seeded) so it's stable and adds depth without
-// competing with the live nodes. Kept off the center so the monogram
-// stays clean.
-function makeField(): { x: number; y: number; r: number; dur: number; delay: number }[] {
-  let s = 0x9e3779b9;
-  const rnd = () => {
-    s = (Math.imul(s ^ (s >>> 15), s | 1) >>> 0) + 0x6d2b79f5;
-    s >>>= 0;
-    return ((s ^ (s >>> 14)) >>> 0) / 4294967296;
-  };
-  const out: { x: number; y: number; r: number; dur: number; delay: number }[] = [];
-  let tries = 0;
-  while (out.length < 26 && tries < 400) {
-    tries++;
-    const x = rnd() * VB_W;
-    const y = rnd() * VB_H;
-    if (Math.hypot(x - CX, y - CY) < RING_OUTER + 26) continue; // keep clear of the orbits
-    out.push({ x, y, r: 0.7 + rnd() * 1.2, dur: 3 + rnd() * 3.5, delay: rnd() * 3 });
-  }
-  return out;
-}
-const STAR_FIELD = makeField();
-
-interface ConstellationProps {
+interface HomeDeviceListProps {
   deviceName: string;
   devices: Device[];
   pairable: NearbyDevice[];
@@ -376,267 +291,142 @@ interface ConstellationProps {
   t: Translate;
 }
 
-function Constellation({ deviceName, devices, pairable, pairingId, loading, onPair, onShowInfo, t }: ConstellationProps) {
-  const [activeId, setActiveId] = useState<string | null>(null);
-
-  const stars = useMemo<Star[]>(() => {
-    const hasPaired = devices.length > 0;
-    const paired = placeGroup(
-      devices,
-      RING_INNER,
-      -90,
-      (d, x, y, len, index) => ({
-        id: d.deviceId,
-        name: d.deviceName,
-        kind: d.online ? "online" : "offline",
-        device: d,
-        nearby: null,
-        x,
-        y,
-        len,
-        index,
-      }),
-      0,
+function HomeDeviceList({ deviceName, devices, pairable, pairingId, loading, onPair, onShowInfo, t }: HomeDeviceListProps) {
+  if (loading) {
+    return (
+      <div className="flex flex-col gap-2" data-testid="home-devices-skeleton" aria-busy="true">
+        {[0, 1].map((i) => (
+          <div key={i} className="card flex items-center gap-3.5 px-4 py-3.5">
+            <div className="h-10 w-10 shrink-0 animate-pulse rounded-xl bg-white/[0.06]" />
+            <div className="flex min-w-0 flex-1 flex-col gap-2">
+              <div className="h-3 w-1/3 animate-pulse rounded bg-white/[0.06]" />
+              <div className="h-2.5 w-1/4 animate-pulse rounded bg-white/[0.04]" />
+            </div>
+          </div>
+        ))}
+      </div>
     );
-    const near = placeGroup(
-      pairable,
-      hasPaired ? RING_OUTER : RING_INNER,
-      -70,
-      (d, x, y, len, index) => ({
-        id: d.deviceId,
-        name: d.deviceName,
-        kind: "nearby",
-        device: null,
-        nearby: d,
-        x,
-        y,
-        len,
-        index,
-      }),
-      devices.length,
-    );
-    return [...paired, ...near];
-  }, [devices, pairable]);
+  }
 
-  const anyOnline = devices.some((d) => d.online);
-  const empty = !loading && stars.length === 0;
-
-  const onStarActivate = useCallback(
-    (star: Star) => {
-      if (star.kind === "nearby" && star.nearby) {
-        if (pairingId === star.id) return;
-        onPair(star.nearby);
-      } else if (star.device) {
-        onShowInfo({ kind: "paired", device: star.device });
-      }
-    },
-    [onPair, onShowInfo, pairingId],
-  );
+  const empty = devices.length === 0 && pairable.length === 0;
 
   return (
-    <div
-      className="relative mx-auto w-full max-w-[560px]"
-      data-testid={loading ? "home-devices-skeleton" : undefined}
-      aria-busy={loading || undefined}
-    >
-      <svg viewBox={`0 0 ${VB_W} ${VB_H}`} className="h-auto w-full select-none" role="group" aria-label={t("nav.devices")}>
-        <defs>
-          <radialGradient id="cnstCenterFill" cx="50%" cy="32%" r="72%">
-            <stop offset="0%" stopColor="rgba(255,255,255,0.18)" />
-            <stop offset="100%" stopColor="rgba(255,255,255,0)" />
-          </radialGradient>
-        </defs>
+    <div className="flex flex-col gap-6">
+      <div className="card flex items-center gap-3.5 px-4 py-3.5">
+        <HomeAvatar name={deviceName || "Me"} online />
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-sm font-medium text-ink">{deviceName || t("status.thisDevice")}</p>
+          <p className="text-xs text-ink-faint">{t("status.thisDevice")}</p>
+        </div>
+      </div>
 
-        {/* Ambient starfield */}
-        <g aria-hidden="true">
-          {STAR_FIELD.map((f, i) => (
-            <circle
-              key={i}
-              className="cnst-twinkle"
-              cx={f.x}
-              cy={f.y}
-              r={f.r}
-              fill="rgb(var(--ink-ghost))"
-              style={{ ["--tw" as string]: `${f.dur}s`, animationDelay: `${f.delay}s` }}
-            />
+      {devices.length > 0 && (
+        <div className="flex flex-col gap-2">
+          <span className="eyebrow px-1">{t("home.paired")}</span>
+          {devices.map((d) => (
+            <PairedRow key={d.deviceId} device={d} onShowInfo={onShowInfo} t={t} />
           ))}
-        </g>
+        </div>
+      )}
 
-        {/* Orbit guides -- faint rings the stars ride on. The outer ring
-            only shows once there's an outer orbit to hint at. */}
-        <g aria-hidden="true" fill="none">
-          <circle cx={CX} cy={CY} r={RING_INNER} stroke="rgba(255,255,255,0.05)" strokeWidth={1} />
-          {devices.length > 0 && pairable.length > 0 && (
-            <circle cx={CX} cy={CY} r={RING_OUTER} stroke="rgba(255,255,255,0.04)" strokeWidth={1} strokeDasharray="2 6" />
-          )}
-        </g>
+      {pairable.length > 0 && (
+        <div className="flex flex-col gap-2">
+          <span className="eyebrow px-1">{t("devices.nearby")}</span>
+          {pairable.map((d) => (
+            <NearbyRow key={d.deviceId} device={d} pairing={pairingId === d.deviceId} onPair={onPair} t={t} />
+          ))}
+        </div>
+      )}
 
-        {/* Ties: drawn center -> star. */}
-        <g aria-hidden="true" fill="none" strokeLinecap="round">
-          {stars.map((star) => {
-            const delay = `${120 + star.index * 70}ms`;
-            if (star.kind === "nearby") {
-              return (
-                <line
-                  key={star.id}
-                  className="cnst-label"
-                  x1={CX}
-                  y1={CY}
-                  x2={star.x}
-                  y2={star.y}
-                  stroke="rgba(255,255,255,0.12)"
-                  strokeWidth={1}
-                  strokeDasharray="4 5"
-                  style={{ animationDelay: delay }}
-                />
-              );
-            }
-            const live = star.kind === "online";
-            return (
-              <g key={star.id}>
-                <line
-                  className="cnst-tie"
-                  x1={CX}
-                  y1={CY}
-                  x2={star.x}
-                  y2={star.y}
-                  stroke={live ? "rgba(255,255,255,0.28)" : "rgba(255,255,255,0.08)"}
-                  strokeWidth={live ? 1.75 : 1}
-                  style={{ ["--len" as string]: star.len, animationDelay: delay }}
-                />
-                {live && (
-                  // The heartbeat: a lit dash traveling out to a live peer.
-                  <line
-                    className="cnst-pulse"
-                    x1={CX}
-                    y1={CY}
-                    x2={star.x}
-                    y2={star.y}
-                    stroke="rgb(var(--paper))"
-                    strokeWidth={3}
-                    strokeLinecap="round"
-                    pathLength={100}
-                    strokeDasharray="8 92"
-                    style={{ animationDelay: `${900 + star.index * 140}ms`, filter: "drop-shadow(0 0 3px rgba(255,255,255,0.7))" }}
-                  />
-                )}
-              </g>
-            );
-          })}
-        </g>
+      {empty && <p className="text-center text-sm text-ink-faint">{t("home.notPairedHint")}</p>}
+    </div>
+  );
+}
 
-        {/* Stars (peers) */}
-        {stars.map((star) => {
-          const active = activeId === star.id;
-          const pairing = pairingId === star.id;
-          const live = star.kind === "online";
-          const delay = `${420 + star.index * 70}ms`;
-          const labelY = NODE_R + 17;
-
-          let sub: string | null = null;
-          if (active) {
-            if (pairing) sub = t("common.pairing");
-            else if (star.kind === "online") sub = t("devices.onlineNow");
-            else if (star.kind === "offline" && star.device)
-              sub = t("devices.lastSeen", { time: formatRelativeTime(star.device.lastSeenMs) });
-            else sub = t("home.tapToPair");
-          }
-
-          const aria =
-            star.kind === "nearby"
-              ? `${star.name} - ${t("devices.nearby")}`
-              : `${star.name} - ${live ? t("common.online") : t("common.offline")}`;
-
-          return (
-            <g
-              key={star.id}
-              className="cnst-node"
-              role="button"
-              tabIndex={0}
-              aria-label={aria}
-              transform={`translate(${star.x},${star.y})`}
-              onClick={() => onStarActivate(star)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" || e.key === " ") {
-                  e.preventDefault();
-                  onStarActivate(star);
-                }
-              }}
-              onMouseEnter={() => setActiveId(star.id)}
-              onMouseLeave={() => setActiveId((cur) => (cur === star.id ? null : cur))}
-              onFocus={() => setActiveId(star.id)}
-              onBlur={() => setActiveId((cur) => (cur === star.id ? null : cur))}
-            >
-              {/* generous invisible hit target */}
-              <circle r={22} fill="transparent" />
-              <circle className="cnst-focus" r={17} fill="none" stroke="rgb(var(--paper))" strokeWidth={1.5} strokeOpacity={0.7} />
-              <g className="cnst-star-in" style={{ animationDelay: delay }}>
-                {(live || pairing) && (
-                  <circle
-                    className="cnst-halo"
-                    r={NODE_R}
-                    fill="none"
-                    stroke="rgb(var(--paper))"
-                    strokeWidth={1.5}
-                    style={pairing ? { animationDuration: "1.4s" } : undefined}
-                  />
-                )}
-                {star.kind === "online" ? (
-                  <circle
-                    r={NODE_R}
-                    fill="rgb(var(--paper))"
-                    style={{ filter: "drop-shadow(0 0 7px rgba(255,255,255,0.55))" }}
-                  />
-                ) : star.kind === "offline" ? (
-                  <circle r={NODE_R} fill="rgb(var(--canvas))" stroke="rgba(255,255,255,0.22)" strokeWidth={1.5} />
-                ) : (
-                  <circle
-                    r={NODE_R}
-                    fill="rgb(var(--canvas))"
-                    stroke="rgba(255,255,255,0.22)"
-                    strokeWidth={1.5}
-                    strokeDasharray="2.5 2.5"
-                  />
-                )}
-              </g>
-              <text
-                className="cnst-label"
-                x={0}
-                y={labelY}
-                textAnchor="middle"
-                style={{ animationDelay: delay }}
-                fontSize={13}
-                fontWeight={500}
-                fill={active ? "rgb(var(--ink))" : "rgb(var(--ink-muted))"}
-              >
-                {star.name.length > 16 ? star.name.slice(0, 15) + "…" : star.name}
-              </text>
-              {sub && (
-                <text x={0} y={labelY + 15} textAnchor="middle" fontSize={10.5} fill="rgb(var(--ink-faint))">
-                  {sub}
-                </text>
-              )}
-            </g>
-          );
-        })}
-
-        {/* Center: this device */}
-        <g transform={`translate(${CX},${CY})`} aria-label={deviceName}>
-          {anyOnline && (
-            <circle className="cnst-halo" r={CENTER_R} fill="none" stroke="rgb(var(--paper))" strokeWidth={1.5} style={{ animationDuration: "2.9s" }} />
-          )}
-          <circle r={CENTER_R} fill="rgb(var(--surface-raised))" stroke="rgba(255,255,255,0.16)" strokeWidth={1.5} />
-          <circle r={CENTER_R} fill="url(#cnstCenterFill)" />
-          <text textAnchor="middle" dominantBaseline="central" fontSize={16} fontWeight={600} fill="rgb(var(--ink))">
-            {monogram(deviceName || "Me")}
-          </text>
-        </g>
-      </svg>
-
-      {empty && (
-        <p className="pointer-events-none absolute inset-x-0 bottom-1 text-center text-sm text-ink-faint">
-          {t("home.notPairedHint")}
+// Memoized so a poll-driven HomePanel re-render (new `devices`/`nearby`
+// array references on every refresh tick) doesn't force every row to
+// re-render -- only rows whose own device object actually changed do.
+const PairedRow = memo(function PairedRow({
+  device: d,
+  onShowInfo,
+  t,
+}: {
+  device: Device;
+  onShowInfo: (target: InfoTarget) => void;
+  t: Translate;
+}) {
+  // Own hook rather than a prop: a locale change re-renders context
+  // consumers even through memo, so the row's relative time follows the
+  // language switch without HomePanel threading locale into every row.
+  const { locale } = useI18n();
+  return (
+    <button
+      type="button"
+      onClick={() => onShowInfo({ kind: "paired", device: d })}
+      aria-label={`${d.deviceName} - ${d.online ? t("common.online") : t("common.offline")}`}
+      className="card card-hover flex items-center gap-3.5 px-4 py-3.5 text-left animate-fade-in"
+    >
+      <HomeAvatar name={d.deviceName} online={d.online} />
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-sm font-medium text-ink">{d.deviceName}</p>
+        <p className="text-xs text-ink-faint">
+          {d.online ? t("devices.onlineNow") : t("devices.lastSeen", { time: formatRelativeTime(d.lastSeenMs, locale) })}
         </p>
+      </div>
+      <span
+        className={`pill ${d.online ? "border-white/15 bg-white/[0.06] text-ink" : "bg-surface-overlay text-ink-faint"}`}
+      >
+        {d.online ? t("common.online") : t("common.offline")}
+      </span>
+    </button>
+  );
+});
+
+const NearbyRow = memo(function NearbyRow({
+  device: d,
+  pairing,
+  onPair,
+  t,
+}: {
+  device: NearbyDevice;
+  pairing: boolean;
+  onPair: (device: NearbyDevice) => void;
+  t: Translate;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={() => !pairing && onPair(d)}
+      disabled={pairing}
+      aria-label={`${d.deviceName} - ${t("devices.nearby")}`}
+      className="card card-hover flex items-center gap-3.5 px-4 py-3.5 text-left disabled:opacity-70 animate-fade-in"
+    >
+      <HomeAvatar name={d.deviceName} />
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-sm font-medium text-ink">{d.deviceName}</p>
+        <p className="nums text-xs text-ink-faint">
+          {d.addr}:{d.port}
+        </p>
+      </div>
+      <span className="pill border-white/15 bg-white/[0.06] text-ink">
+        {pairing ? t("common.pairing") : t("common.pair")}
+      </span>
+    </button>
+  );
+});
+
+function HomeAvatar({ name, online }: { name: string; online?: boolean }) {
+  return (
+    <div className="relative">
+      <div className="flex h-10 w-10 items-center justify-center rounded-xl border border-line bg-gradient-to-b from-white/[0.08] to-transparent text-xs font-semibold tracking-wide text-ink-muted">
+        {monogram(name)}
+      </div>
+      {online !== undefined && (
+        <span
+          className={`absolute -bottom-0.5 -right-0.5 h-3 w-3 rounded-full border-2 border-surface-raised ${
+            online ? "bg-paper" : "bg-ink-ghost"
+          }`}
+        />
       )}
     </div>
   );

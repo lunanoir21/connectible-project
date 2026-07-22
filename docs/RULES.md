@@ -2,7 +2,7 @@
 
 These rules apply across all three components (`daemon/`, `desktop/`,
 `mobile/`). They override personal style preference where they
-conflict. See [PLAN.md](PLAN.md) for schedule and [TASKS.md](TASKS.md)
+conflict. See [PLAN.md](archive/PLAN.md) for schedule and [TASKS.md](TASKS.md)
 for the work items these rules govern.
 
 ---

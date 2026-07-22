@@ -33,14 +33,35 @@ describe("secondsUntil", () => {
   });
 });
 
-describe("formatRelativeTime", () => {
-  it("bucket-formats deltas", () => {
-    const now = 1_000_000_000_000;
-    expect(formatRelativeTime(now, now)).toBe("just now");
-    expect(formatRelativeTime(now - 30_000, now)).toBe("30s ago");
-    expect(formatRelativeTime(now - 5 * 60_000, now)).toBe("5m ago");
-    expect(formatRelativeTime(now - 3 * 3_600_000, now)).toBe("3h ago");
-    expect(formatRelativeTime(now - 2 * 86_400_000, now)).toBe("2d ago");
+describe("formatRelativeTime (T-X15)", () => {
+  const now = 1_000_000_000_000;
+  // Expected strings are computed from Intl directly rather than
+  // hardcoded, so the test is independent of the runtime's exact ICU
+  // wording ("30 sec. ago" vs "30 sec ago" etc.) -- it verifies the
+  // right unit/sign/locale is chosen, which is what the code decides.
+  const rtf = (locale: string) =>
+    new Intl.RelativeTimeFormat(locale, { numeric: "auto", style: "short" });
+
+  it("buckets deltas into the right unit (en)", () => {
+    expect(formatRelativeTime(now, "en", now)).toBe(rtf("en").format(0, "second"));
+    expect(formatRelativeTime(now - 30_000, "en", now)).toBe(rtf("en").format(-30, "second"));
+    expect(formatRelativeTime(now - 5 * 60_000, "en", now)).toBe(rtf("en").format(-5, "minute"));
+    expect(formatRelativeTime(now - 3 * 3_600_000, "en", now)).toBe(rtf("en").format(-3, "hour"));
+    expect(formatRelativeTime(now - 2 * 86_400_000, "en", now)).toBe(rtf("en").format(-2, "day"));
+  });
+
+  it("renders in the active locale (tr differs from en)", () => {
+    expect(formatRelativeTime(now - 30_000, "tr", now)).toBe(rtf("tr").format(-30, "second"));
+    // Turkish "30 sn. önce" must not equal the English rendering, i.e.
+    // the locale is actually threaded through, not ignored.
+    expect(formatRelativeTime(now - 30_000, "tr", now)).not.toBe(
+      formatRelativeTime(now - 30_000, "en", now),
+    );
+  });
+
+  it("renders the sub-5s case as the locale's 'now' wording", () => {
+    expect(formatRelativeTime(now - 1_000, "en", now)).toBe(rtf("en").format(0, "second"));
+    expect(formatRelativeTime(now - 1_000, "tr", now)).toBe(rtf("tr").format(0, "second"));
   });
 });
 

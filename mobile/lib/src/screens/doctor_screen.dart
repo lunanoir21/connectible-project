@@ -140,7 +140,13 @@ class _DoctorScreenState extends State<DoctorScreen> {
           Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              if (report != null) _StatusBadge(status: report.worst, large: true),
+              if (report != null)
+                Expanded(
+                  child: Align(
+                    alignment: Alignment.centerLeft,
+                    child: _StatusBadge(status: report.worst, large: true),
+                  ),
+                ),
               _PillButton(
                 label: _running ? s.t('doctor.running') : s.t('doctor.runAll'),
                 onTap: _running ? null : _runAll,
@@ -271,10 +277,19 @@ class _CheckRow extends StatelessWidget {
               ),
               GestureDetector(
                 onTap: rerunning ? null : onRerun,
-                child: Padding(
-                  padding: const EdgeInsets.only(left: 8, top: 2),
-                  child: Text(rerunLabel,
-                      style: TextStyle(fontSize: 12, color: p.inkFaint)),
+                // The visible text is small, but the tap target still
+                // needs to meet the ~48x48 logical px minimum touch
+                // target guidance -- the extra constraint is invisible,
+                // it doesn't change how the row looks.
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(minWidth: 48, minHeight: 48),
+                  child: Padding(
+                    padding: const EdgeInsets.only(left: 8, top: 2),
+                    child: Center(
+                      child: Text(rerunLabel,
+                          style: TextStyle(fontSize: 12, color: p.inkFaint)),
+                    ),
+                  ),
                 ),
               ),
             ],

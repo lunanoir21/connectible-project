@@ -1,5 +1,6 @@
 import 'package:connectible_mobile/src/generated/connectible.pbgrpc.dart'
     as pb;
+import 'package:connectible_mobile/src/models/models.dart';
 import 'package:connectible_mobile/src/state/device_list_model.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
@@ -55,6 +56,40 @@ void main() {
       model.forgetDevice('does-not-exist');
 
       expect(model.knownDevices().map((d) => d.deviceId), contains('peer-3'));
+    });
+  });
+
+  group('DeviceListModel self-filter (T-X4)', () {
+    test(
+        'merging a connection list containing the local device id does not '
+        'surface it in devices', () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final model = DeviceListModel(prefs, deviceName: 'Test Phone');
+      addTearDown(model.dispose);
+      final selfId = model.localIdentity.deviceId;
+
+      // A daemon's ListDevices response lists every device it knows --
+      // including this phone itself.
+      model.mergeFromConnection([
+        DeviceInfo(
+          deviceId: selfId,
+          deviceName: 'Test Phone',
+          online: true,
+          pairedAtMs: 1,
+          lastSeenMs: 1,
+        ),
+        const DeviceInfo(
+          deviceId: 'peer-x',
+          deviceName: 'Peer X',
+          online: true,
+          pairedAtMs: 1,
+          lastSeenMs: 1,
+        ),
+      ]);
+
+      expect(model.devices.map((d) => d.deviceId), contains('peer-x'));
+      expect(model.devices.map((d) => d.deviceId), isNot(contains(selfId)));
     });
   });
 

@@ -1,7 +1,15 @@
+use aes_gcm::aead::{Aead, Generate, KeyInit};
+use aes_gcm::{Aes256Gcm, Key, Nonce};
 use sqlx::SqlitePool;
 
-use crate::error::Result;
+use crate::error::{DaemonError, Result};
 use crate::proto::connectible::v1::{DeviceType, Identity, Platform};
+
+/// Prefix distinguishing an application-level-encrypted `cert_fingerprint`
+/// value (Phase H) from the plaintext lowercase-hex format every value
+/// used before this phase. Chosen over a length heuristic since it's
+/// unambiguous and self-documenting in the raw DB file too.
+const ENCRYPTED_PREFIX: &str = "enc1:";
 
 /// Row shape for the `devices` table. Deliberately separate from the
 /// wire-level `Identity` proto message -- this struct carries local-only
@@ -23,11 +31,116 @@ pub struct DeviceRecord {
 #[derive(Clone)]
 pub struct DeviceRepository {
     pool: SqlitePool,
+    /// AES-256 key for the `cert_fingerprint` column (Phase H; see
+    /// `docs/design/db-encryption.md`). Sourced once at startup
+    /// (`db::keys::load_or_create_db_key`) and threaded through here
+    /// rather than read fresh per call.
+    fingerprint_key: [u8; 32],
 }
 
 impl DeviceRepository {
-    pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+    pub fn new(pool: SqlitePool, fingerprint_key: [u8; 32]) -> Self {
+        Self {
+            pool,
+            fingerprint_key,
+        }
+    }
+
+    fn cipher(&self) -> Aes256Gcm {
+        let key = Key::<Aes256Gcm>::from(self.fingerprint_key);
+        Aes256Gcm::new(&key)
+    }
+
+    /// Encrypts a fingerprint value for storage. Always produces the
+    /// `ENCRYPTED_PREFIX`-tagged form, including when re-encrypting a
+    /// value that was read back in legacy plaintext form (T-H4's
+    /// transparent-migration-on-write).
+    fn encrypt_fingerprint(&self, plaintext: &str) -> String {
+        let nonce = Nonce::generate();
+        // `Aes256Gcm::encrypt` only fails on catastrophic misuse (e.g. a
+        // plaintext far beyond the format's length limit) -- never for a
+        // ~64-byte hex fingerprint string, so this is not a fallible path
+        // worth propagating as a `Result` up through every caller.
+        let ciphertext = self
+            .cipher()
+            .encrypt(&nonce, plaintext.as_bytes())
+            .expect("fingerprint plaintext is always well within AES-GCM's size limits");
+        let mut combined = Vec::with_capacity(nonce.len() + ciphertext.len());
+        combined.extend_from_slice(&nonce);
+        combined.extend_from_slice(&ciphertext);
+        format!("{ENCRYPTED_PREFIX}{}", hex::encode(combined))
+    }
+
+    /// Decrypts a stored fingerprint value. A value with no
+    /// `ENCRYPTED_PREFIX` is assumed to be a pre-Phase-H plaintext
+    /// fingerprint and returned as-is (T-H4) -- it is upgraded to the
+    /// encrypted form the next time it's written via `set_fingerprint`,
+    /// or explicitly by `migrate_plaintext_fingerprints`. A prefixed
+    /// value that fails to decrypt (wrong key, or genuine corruption) is
+    /// a hard error rather than silently treated as "no pin" -- that
+    /// would silently drop TOFU protection instead of surfacing the
+    /// problem.
+    fn decrypt_fingerprint(&self, stored: &str) -> Result<String> {
+        let Some(hex_str) = stored.strip_prefix(ENCRYPTED_PREFIX) else {
+            return Ok(stored.to_string());
+        };
+        let combined = hex::decode(hex_str)
+            .map_err(|e| DaemonError::Tls(format!("malformed encrypted fingerprint: {e}")))?;
+        if combined.len() < 12 {
+            return Err(DaemonError::Tls(
+                "encrypted fingerprint shorter than a nonce".to_string(),
+            ));
+        }
+        let (nonce_bytes, ciphertext) = combined.split_at(12);
+        let nonce = Nonce::try_from(nonce_bytes)
+            .map_err(|_| DaemonError::Tls("malformed nonce in stored fingerprint".to_string()))?;
+        let plaintext = self.cipher().decrypt(&nonce, ciphertext).map_err(|_| {
+            DaemonError::Tls(
+                "failed to decrypt stored fingerprint (wrong db key, or corrupted data)"
+                    .to_string(),
+            )
+        })?;
+        String::from_utf8(plaintext)
+            .map_err(|e| DaemonError::Tls(format!("decrypted fingerprint is not valid utf-8: {e}")))
+    }
+
+    /// Re-encrypts every paired device's plaintext (pre-Phase-H)
+    /// `cert_fingerprint` in place (T-H4). Safe to call on every daemon
+    /// startup -- a no-op once every value is already in the encrypted
+    /// form. Returns the number of rows migrated.
+    pub async fn migrate_plaintext_fingerprints(&self) -> Result<usize> {
+        let rows = sqlx::query_as::<_, DeviceRecord>(
+            "SELECT * FROM devices WHERE cert_fingerprint IS NOT NULL",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+
+        let mut migrated = 0usize;
+        for row in rows {
+            let Some(stored) = row.cert_fingerprint else {
+                continue;
+            };
+            if stored.starts_with(ENCRYPTED_PREFIX) {
+                continue;
+            }
+            // `stored` is plaintext by construction here (no prefix);
+            // encrypt it and verify the round trip before writing, so a
+            // migration bug can never silently corrupt a working pin.
+            let encrypted = self.encrypt_fingerprint(&stored);
+            let verify = self.decrypt_fingerprint(&encrypted)?;
+            if verify != stored {
+                return Err(DaemonError::Tls(
+                    "fingerprint migration round-trip check failed; refusing to write".to_string(),
+                ));
+            }
+            sqlx::query("UPDATE devices SET cert_fingerprint = ?1 WHERE device_id = ?2")
+                .bind(&encrypted)
+                .bind(&row.device_id)
+                .execute(&self.pool)
+                .await?;
+            migrated += 1;
+        }
+        Ok(migrated)
     }
 
     /// Inserts a new paired device, or refreshes `last_seen_ms` (and
@@ -72,8 +185,9 @@ impl DeviceRepository {
     /// this method itself just writes what it is given. No-op for an
     /// unknown device_id.
     pub async fn set_fingerprint(&self, device_id: &str, fingerprint: &str) -> Result<()> {
+        let encrypted = self.encrypt_fingerprint(fingerprint);
         sqlx::query("UPDATE devices SET cert_fingerprint = ?1 WHERE device_id = ?2")
-            .bind(fingerprint)
+            .bind(encrypted)
             .bind(device_id)
             .execute(&self.pool)
             .await?;
@@ -82,9 +196,14 @@ impl DeviceRepository {
 
     /// The pinned certificate fingerprint for a device, if any. `None` both
     /// for an unknown device and for a known device that has not been
-    /// pinned yet (pre-TOFU). Convenience over `get(..).cert_fingerprint`.
+    /// pinned yet (pre-TOFU). Decrypts the stored value (Phase H); a
+    /// value stored before this phase shipped is plaintext and passed
+    /// through unchanged (T-H4).
     pub async fn fingerprint(&self, device_id: &str) -> Result<Option<String>> {
-        Ok(self.get(device_id).await?.and_then(|r| r.cert_fingerprint))
+        let Some(stored) = self.get(device_id).await?.and_then(|r| r.cert_fingerprint) else {
+            return Ok(None);
+        };
+        self.decrypt_fingerprint(&stored).map(Some)
     }
 
     pub async fn update_last_seen(&self, device_id: &str, now_ms: i64) -> Result<()> {
@@ -151,6 +270,10 @@ mod tests {
         pool
     }
 
+    fn test_key() -> [u8; 32] {
+        [7u8; 32]
+    }
+
     fn sample_identity(id: &str) -> Identity {
         Identity {
             device_id: id.to_string(),
@@ -165,7 +288,7 @@ mod tests {
 
     #[tokio::test]
     async fn insert_then_get() {
-        let repo = DeviceRepository::new(test_pool().await);
+        let repo = DeviceRepository::new(test_pool().await, test_key());
         let identity = sample_identity("dev-1");
         repo.upsert_paired(&identity, 1000).await.expect("upsert");
 
@@ -176,7 +299,7 @@ mod tests {
 
     #[tokio::test]
     async fn fingerprint_starts_null_then_records_and_reads_back() {
-        let repo = DeviceRepository::new(test_pool().await);
+        let repo = DeviceRepository::new(test_pool().await, test_key());
         let identity = sample_identity("dev-fp");
         repo.upsert_paired(&identity, 1000).await.expect("upsert");
 
@@ -196,7 +319,7 @@ mod tests {
 
     #[tokio::test]
     async fn upsert_paired_preserves_a_recorded_fingerprint() {
-        let repo = DeviceRepository::new(test_pool().await);
+        let repo = DeviceRepository::new(test_pool().await, test_key());
         let identity = sample_identity("dev-fp2");
         repo.upsert_paired(&identity, 1000).await.expect("upsert");
         repo.set_fingerprint("dev-fp2", "pinned")
@@ -214,7 +337,7 @@ mod tests {
 
     #[tokio::test]
     async fn repair_preserves_paired_at() {
-        let repo = DeviceRepository::new(test_pool().await);
+        let repo = DeviceRepository::new(test_pool().await, test_key());
         let identity = sample_identity("dev-2");
         repo.upsert_paired(&identity, 1000)
             .await
@@ -233,7 +356,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_orders_by_last_seen_desc() {
-        let repo = DeviceRepository::new(test_pool().await);
+        let repo = DeviceRepository::new(test_pool().await, test_key());
         repo.upsert_paired(&sample_identity("dev-a"), 1000)
             .await
             .expect("a");
@@ -248,7 +371,7 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_device_is_not_paired() {
-        let repo = DeviceRepository::new(test_pool().await);
+        let repo = DeviceRepository::new(test_pool().await, test_key());
         assert!(!repo.is_paired("does-not-exist").await.expect("is_paired"));
     }
 
@@ -258,7 +381,7 @@ mod tests {
     /// than resurrecting the old one.
     #[tokio::test]
     async fn delete_removes_paired_device_and_is_idempotent() {
-        let repo = DeviceRepository::new(test_pool().await);
+        let repo = DeviceRepository::new(test_pool().await, test_key());
         let identity = sample_identity("dev-forget");
         repo.upsert_paired(&identity, 1000).await.expect("upsert");
         assert!(repo.is_paired("dev-forget").await.expect("is_paired"));
@@ -285,5 +408,161 @@ mod tests {
             .expect("get")
             .expect("re-paired");
         assert_eq!(record.paired_at_ms, 9000);
+    }
+
+    /// T-H4: a fingerprint stored before Phase H shipped is plaintext
+    /// (no `ENCRYPTED_PREFIX`) -- simulated here by writing the raw
+    /// column value directly, bypassing `set_fingerprint`, exactly as a
+    /// pre-Phase-H binary would have. `migrate_plaintext_fingerprints`
+    /// must re-encrypt it in place without losing the value or touching
+    /// already-encrypted rows.
+    #[tokio::test]
+    async fn migrate_plaintext_fingerprints_encrypts_legacy_rows_only() {
+        let pool = test_pool().await;
+        let repo = DeviceRepository::new(pool.clone(), test_key());
+        repo.upsert_paired(&sample_identity("dev-legacy"), 1000)
+            .await
+            .expect("upsert legacy");
+        repo.upsert_paired(&sample_identity("dev-already-enc"), 1000)
+            .await
+            .expect("upsert already-encrypted");
+
+        // Legacy plaintext write, bypassing set_fingerprint's encryption.
+        sqlx::query("UPDATE devices SET cert_fingerprint = ?1 WHERE device_id = ?2")
+            .bind("deadbeef00000000000000000000000000000000000000000000000000ab")
+            .bind("dev-legacy")
+            .execute(&pool)
+            .await
+            .expect("write legacy plaintext fingerprint");
+        // Already migrated (or paired fresh under Phase H).
+        repo.set_fingerprint("dev-already-enc", "cafef00d")
+            .await
+            .expect("set encrypted fingerprint");
+
+        let migrated = repo
+            .migrate_plaintext_fingerprints()
+            .await
+            .expect("migrate");
+        assert_eq!(migrated, 1, "only the legacy row should be migrated");
+
+        // The on-disk value is no longer the plaintext string...
+        let raw: (Option<String>,) =
+            sqlx::query_as("SELECT cert_fingerprint FROM devices WHERE device_id = ?1")
+                .bind("dev-legacy")
+                .fetch_one(&pool)
+                .await
+                .expect("raw select");
+        assert_ne!(
+            raw.0.as_deref(),
+            Some("deadbeef00000000000000000000000000000000000000000000000000ab"),
+            "the on-disk value must no longer be plaintext-readable after migration"
+        );
+        assert!(raw.0.as_deref().unwrap().starts_with(ENCRYPTED_PREFIX));
+
+        // ...but it still reads back correctly through the repository.
+        assert_eq!(
+            repo.fingerprint("dev-legacy").await.expect("fp"),
+            Some("deadbeef00000000000000000000000000000000000000000000000000ab".to_string())
+        );
+
+        // A second migration pass is a no-op (nothing left to migrate).
+        let second_pass = repo
+            .migrate_plaintext_fingerprints()
+            .await
+            .expect("second migrate");
+        assert_eq!(second_pass, 0);
+    }
+
+    /// T-H7: opening (decrypting) a fingerprint encrypted under a
+    /// *different* key fails cleanly with a typed error, never a panic,
+    /// and never silently treated as "no pin" (which would drop TOFU
+    /// protection outright).
+    #[tokio::test]
+    async fn wrong_key_fails_to_decrypt_cleanly_instead_of_panicking() {
+        let pool = test_pool().await;
+        let writer = DeviceRepository::new(pool.clone(), test_key());
+        writer
+            .upsert_paired(&sample_identity("dev-wrongkey"), 1000)
+            .await
+            .expect("upsert");
+        writer
+            .set_fingerprint("dev-wrongkey", "abc123")
+            .await
+            .expect("set");
+
+        let reader = DeviceRepository::new(pool, [42u8; 32]);
+        let result = reader.fingerprint("dev-wrongkey").await;
+        assert!(
+            result.is_err(),
+            "decrypting with the wrong key must be a typed error, not Ok(None) or a panic"
+        );
+    }
+
+    /// T-H7: encryption must not change the pool's concurrent-access
+    /// behavior -- several connections reading/writing different
+    /// devices' fingerprints at once still all succeed and each sees a
+    /// consistent, correctly round-tripped value, same as the
+    /// pre-encryption baseline (`sqlx`'s own pool/locking handles the
+    /// actual concurrency; this proves the new encrypt/decrypt step
+    /// introduced no shared mutable state that would break under it).
+    #[tokio::test]
+    async fn concurrent_fingerprint_writes_all_round_trip_correctly() {
+        // A real multi-connection pool needs a file-backed database --
+        // `sqlite::memory:` gives each pooled connection its own
+        // independent empty database, which would make this test
+        // meaningless (every read would see nothing the other
+        // connections wrote). `test_pool()` above sidesteps this by
+        // capping at one connection; this test specifically wants more
+        // than one to exercise real concurrent access.
+        let dir = std::env::temp_dir().join(format!(
+            "connectibled-concurrent-fp-test-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("system clock before unix epoch")
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).expect("create temp dir");
+        let db_path = dir.join("test.db");
+        let options = sqlx::sqlite::SqliteConnectOptions::new()
+            .filename(&db_path)
+            .create_if_missing(true);
+        let pool = SqlitePoolOptions::new()
+            .max_connections(5)
+            .connect_with(options)
+            .await
+            .expect("file-backed sqlite connect");
+        sqlx::migrate!("./migrations")
+            .run(&pool)
+            .await
+            .expect("run migrations");
+        let repo = DeviceRepository::new(pool, test_key());
+
+        for i in 0..10 {
+            repo.upsert_paired(&sample_identity(&format!("dev-c{i}")), 1000)
+                .await
+                .expect("upsert");
+        }
+
+        let mut tasks = Vec::new();
+        for i in 0..10 {
+            let repo = repo.clone();
+            tasks.push(tokio::spawn(async move {
+                let fp = format!("fingerprint-{i}");
+                repo.set_fingerprint(&format!("dev-c{i}"), &fp)
+                    .await
+                    .expect("concurrent set");
+                let read_back = repo
+                    .fingerprint(&format!("dev-c{i}"))
+                    .await
+                    .expect("concurrent get");
+                assert_eq!(read_back, Some(fp));
+            }));
+        }
+        for task in tasks {
+            task.await.expect("task panicked");
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -89,6 +89,41 @@ class TransferProgress {
       totalBytes <= 0 ? 0 : (bytesTransferred / totalBytes).clamp(0, 1);
 }
 
+/// One persisted transfer_history entry (Phase J): mobile has no
+/// separate daemon process, so unlike desktop this is kept entirely by
+/// [FileTransferModel] itself, in `shared_preferences`, mirroring
+/// `DeviceListModel`'s paired-device roster persistence pattern.
+class TransferHistoryEntry {
+  const TransferHistoryEntry({
+    required this.transferId,
+    required this.peerDeviceId,
+    required this.fileName,
+    required this.totalBytes,
+    required this.direction,
+    required this.status,
+    required this.startedAtMs,
+    required this.finishedAtMs,
+    this.localPath = '',
+  });
+
+  final String transferId;
+  final String peerDeviceId;
+  final String fileName;
+  final int totalBytes;
+  final TransferDirection direction;
+  /// "completed" | "failed" | "canceled".
+  final String status;
+  final int startedAtMs;
+  final int finishedAtMs;
+
+  /// On-disk path of a completed *incoming* transfer's final file inside
+  /// the app-private `received/` directory (T-X5), so "Save to..." still
+  /// works after an app restart. Empty for outgoing transfers, for
+  /// non-completed ones, and for entries persisted before this field
+  /// existed (the JSON key is optional/backward-compatible).
+  final String localPath;
+}
+
 class PairingPrompt {
   const PairingPrompt({
     required this.requesterDeviceId,

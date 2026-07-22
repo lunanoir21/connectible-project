@@ -89,6 +89,20 @@ class ConnectibleServer extends pb.ConnectibleServiceBase {
   Future<int> start(ServerIdentity identity, {int port = kServerPort}) async {
     await stop();
     final server = Server.create(services: [this]);
+    // Phase G, T-G6 investigated requesting a client certificate here
+    // (`requestClientCertificate: true`), mirroring the daemon's
+    // `AcceptAnyClientCert`. Reverted: unlike rustls, `dart:io`'s
+    // `SecureServerSocket` always chain-verifies whatever client
+    // certificate is presented and rejects the handshake outright if it
+    // doesn't validate -- there is no "accept any, decide later" escape
+    // hatch, so setting this makes every client-cert-bearing connection
+    // (i.e. any connect from this codebase's own `GrpcService`, which
+    // always presents one) fail with `CERTIFICATE_VERIFY_FAILED: self
+    // signed certificate`, confirmed with a standalone `SecureServerSocket`
+    // reproduction. Mobile's responder-side pairing gate instead checks
+    // claimed device_id against the paired store only (see
+    // `PairingModel.onInboundSyncStream`) -- no TLS-layer identity
+    // binding on this side, since the platform does not offer one.
     await server.serve(
       port: port,
       security: Tls13OnlyServerCredentials(
@@ -259,6 +273,21 @@ class ConnectibleServer extends pb.ConnectibleServiceBase {
   Future<pb.GetPinnedFingerprintResponse> getPinnedFingerprint(
       ServiceCall call, pb.GetPinnedFingerprintRequest request) async {
     throw const GrpcError.unimplemented('GetPinnedFingerprint is loopback-only');
+  }
+
+  @override
+  Future<pb.PreArmPairingCodeResponse> preArmPairingCode(
+      ServiceCall call, pb.PreArmPairingCodeRequest request) async {
+    // Loopback-only, same as the RPCs above -- and mobile additionally
+    // has no pre-arm concept in `PairingManager` at all yet (it only
+    // supports responder-side createPending/confirm keyed to an
+    // already-known requester), so this would need real design work
+    // beyond "just implement it" even if it were remote-facing. See the
+    // desktop's own `pre_arm_pairing_code` for the daemon-side
+    // reference implementation if mobile-generated QR pairing (scan a
+    // code shown *on the phone*) is ever prioritized.
+    throw const GrpcError.unimplemented(
+        'PreArmPairingCode is loopback-only and not yet implemented on mobile');
   }
 
   @override

@@ -57,7 +57,7 @@ impl DesktopError {
     /// mirroring `DaemonError::code()` on the daemon side
     /// (`daemon/src/error.rs`) so the Tauri command boundary can hand
     /// the frontend a structured code instead of only `Display` text
-    /// (see design-docs/error-code-mapping.md). Variants that did not
+    /// (see docs/design/error-code-mapping.md). Variants that did not
     /// originate from an explicit proto `Error` envelope fall back to a
     /// best-effort inference from the gRPC status code -- the daemon's
     /// own `to_status` (grpc/service.rs) already collapses several

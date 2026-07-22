@@ -55,6 +55,10 @@ describe("HomePanel", () => {
     forgetDevice.mockReset();
     writeText.mockClear();
     localAddresses.mockClear();
+    // Forgetting now asks for confirmation first; default to "confirmed"
+    // so the existing forget test exercises the same flow as before.
+    // The dedicated cancel test below overrides this per-call.
+    vi.spyOn(window, "confirm").mockReturnValue(true);
   });
 
   it("shows the real peer-connection status, not local-daemon liveness", () => {
@@ -381,5 +385,24 @@ describe("HomePanel", () => {
 
     await waitFor(() => expect(forgetDevice).toHaveBeenCalledWith("d1"));
     await waitFor(() => expect(onRefresh).toHaveBeenCalled());
+  });
+
+  it("does not forget a device from its info dialog when the confirmation is dismissed", () => {
+    vi.spyOn(window, "confirm").mockReturnValue(false);
+    render(
+      <HomePanel
+        deviceName="Me"
+        devices={[pairedPhone]}
+        nearby={[]}
+        onPairStarted={vi.fn()}
+        onNavigate={vi.fn()}
+        onRefresh={vi.fn()}
+      />,
+    );
+
+    fireEvent.click(screen.getByText("Anil Phone"));
+    fireEvent.click(screen.getByRole("button", { name: "Forget device" }));
+
+    expect(forgetDevice).not.toHaveBeenCalled();
   });
 });

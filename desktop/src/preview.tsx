@@ -57,8 +57,8 @@ const notifications: Notification[] = [
 ];
 
 const transfers: Record<string, TransferProgress> = {
-  t1: { transferId: "t1", fileName: "render-final.mp4", bytesTransferred: 61_000_000, totalBytes: 128_000_000, completed: false, failed: false, canceled: false, direction: "outgoing" },
-  t0: { transferId: "t0", fileName: "contract.pdf", bytesTransferred: 2_400_000, totalBytes: 2_400_000, completed: true, failed: false, canceled: false, direction: "incoming" },
+  t1: { transferId: "t1", fileName: "render-final.mp4", bytesTransferred: 61_000_000, totalBytes: 128_000_000, completed: false, failed: false, canceled: false, direction: "outgoing", mimeType: "video/mp4" },
+  t0: { transferId: "t0", fileName: "contract.pdf", bytesTransferred: 2_400_000, totalBytes: 2_400_000, completed: true, failed: false, canceled: false, direction: "incoming", mimeType: "application/pdf" },
 };
 
 const samplePrompt = {
@@ -122,7 +122,15 @@ function Preview() {
           {panel === "notifications" && <NotificationsPanel notifications={notifications} />}
           {panel === "doctor" && <ConnectionDoctorPanel />}
           {panel === "settings" && (
-            <SettingsPanel theme={theme} onThemeChange={setTheme} deviceName="Studio Desktop" appVersion="0.1.0" />
+            <SettingsPanel
+              theme={theme}
+              onThemeChange={setTheme}
+              deviceName="Studio Desktop"
+              appVersion="0.1.0"
+              onOpenPairingQr={() => {}}
+              clipboardSyncEnabled
+              onClipboardSyncRefresh={() => {}}
+            />
           )}
         </main>
       </div>

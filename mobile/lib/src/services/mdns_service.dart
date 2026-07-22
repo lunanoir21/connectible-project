@@ -1,11 +1,20 @@
 import 'dart:async';
 import 'dart:convert';
-import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:multicast_dns/multicast_dns.dart';
 import 'package:nsd/nsd.dart' as nsd;
 
 import '../models/models.dart';
+
+/// Channel to the native Wi-Fi multicast lock (T-X20). Held while mDNS
+/// discovery is active so the OS does not filter inbound multicast; a no-op
+/// off Android, where no such lock exists. Public for the mocked-channel
+/// unit test (mirrors `save_file_service.dart`'s seam).
+@visibleForTesting
+const MethodChannel multicastLockChannel =
+    MethodChannel('connectible/multicast');
 
 /// Result type for mDNS operations - either success with devices or error message.
 class DiscoveryResult {
@@ -49,6 +58,41 @@ class MdnsService {
 
   MDnsClient? _client;
   nsd.Registration? _registration;
+
+  /// Whether the native multicast lock is currently held, so acquire/release
+  /// stay idempotent and each native acquire is paired with one release.
+  bool _multicastLockHeld = false;
+
+  /// Acquires the Wi-Fi multicast lock so the OS delivers inbound multicast
+  /// (mDNS) to this app while discovery is active (T-X20). Idempotent, and a
+  /// no-op off Android or when the native side is not wired (dev shell).
+  /// Called by [DeviceListModel] on discovery start / foreground resume.
+  Future<void> acquireMulticastLock() async {
+    if (_multicastLockHeld) return;
+    if (defaultTargetPlatform != TargetPlatform.android) return;
+    try {
+      await multicastLockChannel.invokeMethod<void>('acquire');
+      _multicastLockHeld = true;
+    } on MissingPluginException {
+      // Native side absent (e.g. the linux dev shell) -- discovery still runs.
+    } on PlatformException catch (e) {
+      debugPrint('multicast lock acquire failed: ${e.message}');
+    }
+  }
+
+  /// Releases the multicast lock (T-X20). Idempotent; a no-op if not held.
+  /// Called by [DeviceListModel] on discovery stop / background pause.
+  Future<void> releaseMulticastLock() async {
+    if (!_multicastLockHeld) return;
+    _multicastLockHeld = false;
+    try {
+      await multicastLockChannel.invokeMethod<void>('release');
+    } on MissingPluginException {
+      // ignore
+    } on PlatformException catch (e) {
+      debugPrint('multicast lock release failed: ${e.message}');
+    }
+  }
 
   /// Runs a single discovery sweep and returns the devices found within
   /// [timeout]. Callers can poll this periodically to refresh a list.
@@ -168,7 +212,9 @@ class MdnsService {
   void dispose() {
     _client?.stop();
     _client = null;
-    // Fire-and-forget: unregister the mDNS advertisement on teardown.
+    // Fire-and-forget: unregister the mDNS advertisement and drop the
+    // multicast lock on teardown.
     unawaited(stopAdvertising());
+    unawaited(releaseMulticastLock());
   }
 }

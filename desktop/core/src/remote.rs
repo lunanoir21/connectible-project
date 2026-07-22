@@ -1,6 +1,6 @@
 use std::io::SeekFrom;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use connectibled::proto::connectible::v1::connectible_client::ConnectibleClient;
@@ -11,12 +11,11 @@ use connectibled::proto::connectible::v1::{
     PrepareUploadRequest, RemoteInputEvent, SyncFrame, UploadFileHeader, UploadFileMeta,
     UploadFilePart,
 };
-use connectibled::transfer;
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::{mpsc, Notify};
 use tokio_stream::wrappers::ReceiverStream;
-use tonic::transport::{Channel, ClientTlsConfig};
+use tonic::transport::{Channel, ClientTlsConfig, Identity as TlsIdentity};
 
 /// Chunk size for the dedicated upload stream. Larger than the old 64KB
 /// SyncStream chunk since there is no per-chunk CRC/framing overhead here
@@ -94,8 +93,12 @@ impl RemoteDeviceClient {
     /// Connects to `addr:port` over TLS 1.3 with no pin (first contact /
     /// pairing). The peer's cert is accepted and recorded; read it back
     /// with [`observed_fingerprint`](Self::observed_fingerprint) to pin it.
-    pub async fn connect(addr: &str, port: u16) -> Result<Self> {
-        Self::connect_pinned(addr, port, None).await
+    /// `data_dir` is *this* device's own local daemon data directory --
+    /// its `tls/cert.pem`+`key.pem` are presented as the outbound client
+    /// identity (Phase G, T-G3), the same identity a peer would see if
+    /// it connected back to this device's own server.
+    pub async fn connect(data_dir: &Path, addr: &str, port: u16) -> Result<Self> {
+        Self::connect_pinned(data_dir, addr, port, None).await
     }
 
     /// Connects to `addr:port` over TLS 1.3, enforcing TOFU (T-C2/C3): if
@@ -103,15 +106,20 @@ impl RemoteDeviceClient {
     /// or the handshake is rejected with `FINGERPRINT_CHANGED`. Either way
     /// the observed fingerprint is captured for the caller to pin.
     pub async fn connect_pinned(
+        data_dir: &Path,
         addr: &str,
         port: u16,
         pinned: Option<String>,
     ) -> Result<Self> {
         let endpoint = format!("https://{addr}:{port}");
         let (verifier, observed) = TofuVerifier::new(pinned);
+        let tls_dir = data_dir.join("tls");
+        let (cert_pem, key_pem) = connectibled::tls::load_or_create_identity_pem(&tls_dir)
+            .map_err(|e| DesktopError::Other(format!("loading local TLS identity: {e}")))?;
+        let identity = TlsIdentity::from_pem(cert_pem, key_pem);
         let channel = match Channel::from_shared(endpoint)
             .map_err(|e| DesktopError::InvalidAddress(e.to_string()))?
-            .tls_config_with_verifier(ClientTlsConfig::new(), verifier)?
+            .tls_config_with_verifier(ClientTlsConfig::new().identity(identity), verifier)?
             // Keep long-lived SyncStreams (file sends, input sessions)
             // alive across NAT idle timeouts and detect half-open drops.
             .http2_keep_alive_interval(std::time::Duration::from_secs(20))
@@ -190,195 +198,6 @@ impl RemoteDeviceClient {
             .await?
             .into_inner();
         Ok(response.verified)
-    }
-
-    /// Sends a file to the remote device over a fresh SyncStream,
-    /// reporting outgoing progress through `progress`. Progress events
-    /// are derived by intercepting the chunk frames the shared
-    /// `connectibled::transfer::send_file_with_resend` produces, so the
-    /// sender logic itself stays single-sourced in the daemon crate.
-    ///
-    /// `start_offset` resumes a previously-interrupted send (T-025):
-    /// pass the byte count the caller last saw acknowledged for this
-    /// `transfer_id` (0 for a fresh transfer). The receiver reuses its
-    /// on-disk partial file for the same `transfer_id`, so re-sending
-    /// from 0 would only waste bandwidth, not corrupt anything -- but
-    /// resuming from the real offset is what makes T-025 actually work
-    /// end-to-end instead of just being supported on the receive side.
-    ///
-    /// T-306: while the send is in flight, an inbound `FileChunkRequest`
-    /// (the peer detected a corrupted chunk via CRC32) is forwarded to
-    /// `send_file_with_resend`, which reuses its already-open file
-    /// handle to resend just that chunk -- distinct from the coarser
-    /// T-025 whole-transfer resume path.
-    pub async fn send_file(
-        &self,
-        path: &Path,
-        local_identity: Identity,
-        progress: mpsc::Sender<TransferProgressDto>,
-        transfer_id: String,
-        cancel: Arc<Notify>,
-        start_offset: i64,
-    ) -> Result<String> {
-        let file_name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("file")
-            .to_string();
-        let total_bytes = tokio::fs::metadata(path).await?.len() as i64;
-
-        // Frames flow: send_file_with_resend -> intercept channel
-        // (progress accounting) -> outbound gRPC stream.
-        let (frame_tx, mut frame_rx) = mpsc::channel::<SyncFrame>(16);
-        let (grpc_tx, grpc_rx) = mpsc::channel::<SyncFrame>(16);
-
-        // Bytes acked by the forwarder, so a cancel can report where the
-        // transfer stopped instead of jumping the progress bar to 0.
-        // Seeded from `start_offset` so a resumed send's progress bar
-        // starts where it actually left off, not back at 0.
-        let sent = Arc::new(AtomicI64::new(start_offset));
-        let progress_id = transfer_id.clone();
-        let progress_name = file_name.clone();
-        let sent_counter = sent.clone();
-        // Kept for the cancel path, since the forwarder takes `progress`.
-        let progress_cancel = progress.clone();
-        let forwarder = tokio::spawn(async move {
-            let mut sent_bytes: i64 = start_offset;
-            let mut last_emit = std::time::Instant::now() - std::time::Duration::from_secs(1);
-            while let Some(frame) = frame_rx.recv().await {
-                if let Some(Payload::FileChunk(chunk)) = &frame.payload {
-                    sent_bytes = sent_bytes.max(chunk.offset_bytes + chunk.data.len() as i64);
-                    sent_counter.store(sent_bytes, Ordering::Relaxed);
-                    let done = chunk.is_last;
-                    // Same UI-facing throttle as the daemon's incoming
-                    // progress (T-027): at most ~4 events/second, but
-                    // the final event always fires.
-                    if done || last_emit.elapsed() >= std::time::Duration::from_millis(250) {
-                        last_emit = std::time::Instant::now();
-                        let _ = progress
-                            .send(TransferProgressDto {
-                                transfer_id: progress_id.clone(),
-                                file_name: progress_name.clone(),
-                                bytes_transferred: sent_bytes,
-                                total_bytes,
-                                completed: done,
-                                failed: false,
-                                canceled: false,
-                                direction: "outgoing".to_string(),
-                            })
-                            .await;
-                    }
-                }
-                if grpc_tx.send(frame).await.is_err() {
-                    break;
-                }
-            }
-        });
-
-        let mut client = self.client.clone();
-        let outbound = ReceiverStream::new(grpc_rx);
-        let response_stream = client.sync_stream(outbound).await?;
-
-        // Identity first (stream protocol: identify before data frames),
-        // then the chunked file.
-        frame_tx
-            .send(SyncFrame {
-                payload: Some(Payload::Identity(local_identity)),
-            })
-            .await
-            .map_err(|_| DesktopError::Other("sync stream closed before send".to_string()))?;
-
-        // T-306: read the peer's response stream concurrently with the
-        // send below (rather than only after, as before this change),
-        // since a FileChunkRequest can arrive mid-transfer and needs to
-        // reach send_file_with_resend while it is still running.
-        // Forwards each FileChunkRequest as a ResendRequest and remembers
-        // the first Error frame (e.g. checksum mismatch, once resend
-        // attempts are exhausted) to surface as this call's failure.
-        let (resend_tx, resend_rx) = mpsc::channel::<transfer::ResendRequest>(8);
-        let mut inbound = response_stream.into_inner();
-        let inbound_task = tokio::spawn(async move {
-            let mut peer_error: Option<String> = None;
-            while let Ok(Some(frame)) = inbound.message().await {
-                match frame.payload {
-                    Some(Payload::FileChunkRequest(req)) => {
-                        let _ = resend_tx
-                            .send(transfer::ResendRequest {
-                                transfer_id: req.transfer_id,
-                                offset_bytes: req.offset_bytes,
-                            })
-                            .await;
-                    }
-                    Some(Payload::Error(error)) => {
-                        peer_error = Some(error.message);
-                        break;
-                    }
-                    _ => {}
-                }
-            }
-            peer_error
-        });
-
-        // Race the chunked send against a user cancel. On cancel we stop
-        // feeding chunks (dropping frame_tx ends the outbound stream) and
-        // emit a terminal "canceled" progress so the UI settles. The send
-        // future is scoped so it (and its borrow of frame_tx) is dropped
-        // before frame_tx below.
-        let canceled = {
-            let send = transfer::send_file_with_resend(
-                &frame_tx,
-                Some(resend_rx),
-                path,
-                transfer_id.clone(),
-                start_offset,
-            );
-            tokio::pin!(send);
-            tokio::select! {
-                r = &mut send => {
-                    r.map_err(|e| DesktopError::Other(format!("file send failed: {e}")))?;
-                    false
-                }
-                _ = cancel.notified() => {
-                    let _ = progress_cancel
-                        .send(TransferProgressDto {
-                            transfer_id: transfer_id.clone(),
-                            file_name: file_name.clone(),
-                            bytes_transferred: sent.load(Ordering::Relaxed),
-                            total_bytes,
-                            completed: false,
-                            failed: true,
-                            canceled: true,
-                            direction: "outgoing".to_string(),
-                        })
-                        .await;
-                    true
-                }
-            }
-        };
-
-        drop(frame_tx);
-        forwarder
-            .await
-            .map_err(|e| DesktopError::Other(format!("progress forwarder panicked: {e}")))?;
-
-        if canceled {
-            inbound_task.abort();
-            return Ok(transfer_id);
-        }
-
-        // The peer's response stream closes shortly after it sees our
-        // outbound close (dropped above); collect whatever the inbound
-        // task saw in the meantime.
-        if let Some(message) = inbound_task
-            .await
-            .map_err(|e| DesktopError::Other(format!("inbound reader panicked: {e}")))?
-        {
-            return Err(DesktopError::Other(format!(
-                "peer rejected transfer: {message}"
-            )));
-        }
-
-        Ok(transfer_id)
     }
 
     /// Uploads a file over the dedicated `PrepareUpload` + `UploadFile`
@@ -509,6 +328,7 @@ impl RemoteDeviceClient {
                             failed: false,
                             canceled: false,
                             direction: "outgoing".to_string(),
+                            mime_type: String::new(),
                         })
                         .await;
                 }
@@ -532,6 +352,7 @@ impl RemoteDeviceClient {
             failed,
             canceled,
             direction: "outgoing".to_string(),
+            mime_type: String::new(),
         };
 
         if result.completed && result.hash_ok {

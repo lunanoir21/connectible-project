@@ -6,10 +6,10 @@ React desktop UI, Flutter mobile app. Shared contract: `connectible.proto`.
 
 Status: MVP planning. Target: v0.1.0 in 4-6 weeks (200-220 hours).
 
-See also: [TASKS.md](TASKS.md) for the granular task breakdown,
-[RULES.md](RULES.md) for coding/testing/security standards,
-[ARCHITECTURE.md](ARCHITECTURE.md) for topology and sequence diagrams,
-[proto/connectible.proto](proto/connectible.proto) for the wire protocol.
+See also: [TASKS.md](../TASKS.md) for the granular task breakdown,
+[RULES.md](../RULES.md) for coding/testing/security standards,
+[ARCHITECTURE.md](../ARCHITECTURE.md) for topology and sequence diagrams,
+[proto/connectible.proto](../../proto/connectible.proto) for the wire protocol.
 
 ---
 
@@ -29,9 +29,13 @@ See also: [TASKS.md](TASKS.md) for the granular task breakdown,
 
 ### Non-goals (explicitly deferred)
 - Public key pinning / trust-on-first-use certificate storage (v1.0).
+  **Delivered, Phase G, 2026-07-20** -- bidirectional TOFU pinning; see
+  `docs/tofu-trust-store.md`.
 - Message-level signing beyond TLS (optional, post-MVP).
 - SQLite at-rest encryption (MVP stores plaintext; flagged as a known
   gap in the security checklist, not silently ignored).
+  **Delivered, Phase H, 2026-07-20** -- application-level AES-256-GCM
+  on the `cert_fingerprint` column; see `docs/design/db-encryption.md`.
 - Internet/relay-based sync (WAN); MVP is LAN-only.
 - Multi-hop routing between more than two paired devices per session.
 - Windows/macOS input-injection backends (Linux X11/Wayland only for
@@ -244,7 +248,7 @@ T-005 mDNS disc  T-008 TLS self-signed cert   T-043 Provider setup
 | Scope creep: contributors gold-plating clipboard/file/input beyond MVP acceptance criteria | Medium | Medium | TASKS.md acceptance criteria are the definition of done; anything beyond is a `[optional]`-labeled task, not blocking week 4/6 checkpoints. |
 | Single point of failure: one contributor blocked on proto changes blocks everyone | Low | High | Proto frozen at end of week 1 (T-002); any post-freeze change requires updating all three codegen targets in the same PR and is treated as a breaking-change review, not a quick edit. |
 | Flutter <-> Rust daemon interop bugs only found in week 5 | Medium | High | Cross-platform manual pairing test happens incrementally from week 2 onward (pairing), week 3-4 (features), not deferred entirely to week 5. |
-| SQLite plaintext storage is a real security gap | High (accepted) | Medium | Explicitly documented in RULES.md security checklist and PLAN.md non-goals as an MVP-known limitation; do not let it silently become "the design" -- track it as a v1.0 task. |
+| SQLite plaintext storage is a real security gap | High (accepted) | Medium | Explicitly documented in RULES.md security checklist and PLAN.md non-goals as an MVP-known limitation; do not let it silently become "the design" -- track it as a v1.0 task. **Delivered, Phase H, 2026-07-20.** |
 
 ---
 

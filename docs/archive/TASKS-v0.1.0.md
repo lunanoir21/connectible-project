@@ -516,7 +516,7 @@ verifying Hyprland/wlroots parity end-to-end.
   select `wayland-native` at startup (over X11/XWayland, which is
   tried second) and that clipboard sync genuinely lands in the real
   Wayland clipboard end-to-end (see
-  design-docs/manual-test-log.md). Did not literally disable XWayland
+  docs/design/manual-test-log.md). Did not literally disable XWayland
   to rule out a false-positive fallback, and did not interactively
   drive remote input (would move the tester's live cursor) -- both
   noted as open items in the manual test log.
@@ -585,7 +585,7 @@ Unit, integration, and endurance coverage gaps from Phase 0.
 - [x] T-907: Execute the cross-platform manual test matrix (T-051
   style): Linux X11 <-> Linux Wayland (Hyprland), Linux <-> Android,
   covering pairing, clipboard, file transfer, remote input.
-  Files: new `design-docs/manual-test-log.md` (per T-206's convention).
+  Files: new `docs/design/manual-test-log.md` (per T-206's convention).
   Dependencies: T-301, T-302, T-803.
   Acceptance: pass/fail recorded per feature per platform pair; any
   fail has a linked follow-up task.
@@ -593,7 +593,7 @@ Unit, integration, and endurance coverage gaps from Phase 0.
   Hyprland/Wayland machine (no second machine, no genuine X11-only
   session, no Android device/emulator). Ran a real two-daemon
   pairing + clipboard-sync test on this machine (PASS both,
-  see design-docs/manual-test-log.md); file transfer/corruption-resend/
+  see docs/design/manual-test-log.md); file transfer/corruption-resend/
   throughput already covered by the automated real-TLS test suite;
   Linux<->Android and true X11-desktop pairs are recorded as open,
   needing hardware not available here -- not silently marked green.

@@ -4,7 +4,7 @@ import { formatRelativeTime } from "../lib/format";
 import { errorCodeMessage } from "../lib/errors";
 import { EmptyState } from "./EmptyState";
 import { ErrorState } from "./ErrorState";
-import { useT } from "../i18n";
+import { useT, useI18n } from "../i18n";
 
 interface NotificationsPanelProps {
   notifications: Notification[];
@@ -38,6 +38,7 @@ function NotificationsListSkeleton() {
 /// MVP, so this is a read-only view and says so.
 export function NotificationsPanel({ notifications, loading, loadError, onRefresh }: NotificationsPanelProps) {
   const t = useT();
+  const { locale } = useI18n();
   return (
     <section className="flex h-full flex-col gap-5 animate-fade-in">
       <div className="flex items-center justify-between">
@@ -67,7 +68,7 @@ export function NotificationsPanel({ notifications, loading, loadError, onRefres
                   </span>
                   <p className="text-[13px] font-medium text-ink">{n.appName}</p>
                 </div>
-                <span className="text-[11px] text-ink-faint">{formatRelativeTime(n.postedAtMs)}</span>
+                <span className="text-[11px] text-ink-faint">{formatRelativeTime(n.postedAtMs, locale)}</span>
               </div>
               {n.title && <p className="mt-2 text-sm text-ink">{n.title}</p>}
               {n.body && <p className="mt-0.5 text-[13px] leading-relaxed text-ink-muted">{n.body}</p>}

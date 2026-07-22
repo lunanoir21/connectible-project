@@ -1,3 +1,19 @@
+> **ARCHIVED (2026-07-19, updated 2026-07-20).** This is the
+> file-transfer re-architecture roadmap (backpressure, dedicated upload
+> stream, streaming hash resume). Active work now lives in
+> `docs/TASKS.md`, which as of 2026-07-20 tracks the v1.0.0 completion-
+> criteria work (Phases G-N: mTLS identity, DB encryption, legacy
+> transfer-path removal, and beyond) -- it superseded an earlier
+> revision of itself that tracked mobile pairing/QR + desktop UI
+> simplification (now archived at `TASKS-v1.0-pairing-ui.md`), which is
+> in turn also done. Only **T-B3** (real-device battery verification)
+> remains open in this file -- T-A20/T-A21/T-A22 are done, see their
+> entries below for the account and an important flagged deviation from
+> this section's own gating condition. `TASKS.md` links back here
+> rather than duplicating T-B3; do not resume it without checking
+> `TASKS.md` first (it's re-tracked there as Phase N, also parked
+> pending Luna's go-ahead since it needs real hardware).
+
 # Connectible - Road to v1.0.0 (Phased Task Breakdown)
 
 **Created:** 2026-07-16. Supersedes the v0.1.0 MVP plan, archived at
@@ -335,25 +351,40 @@ RPCs: desktop `commands::send_file` -> `upload_file`; mobile
 mobile receivers implement the upload RPCs. No production code path emits
 `FileTransferStart`/`FileChunk` anymore.
 
-### T-A20: Remove old chunk handling on the daemon  `[ ]` (gated on T-A25)
-### T-A21: Remove old chunk handling on mobile  `[ ]` (gated on T-A25)
-### T-A22: Reserve the retired proto fields  `[ ]` (gated on T-A25)
+### T-A20: Remove old chunk handling on the daemon  `[x]`
+### T-A21: Remove old chunk handling on mobile  `[x]`
+### T-A22: Reserve the retired proto fields  `[x]`
 
-**Deliberately deferred until after real-device verification (T-A25).**
-The old `FileChunk`/`FileTransferStart` path is now **dormant** (nothing
-in production uses it) but kept intact as a working fallback. Deleting a
-proven-working transport before the replacement is confirmed on Luna's
-actual phone+desktop would be premature -- the correct sequence is:
-verify the new path on real hardware (T-A25), *then* remove the old one.
-When these run: delete the chunk handling from `SyncStream`
-(`daemon/src/grpc/service.rs`) + `TransferManager` chunk machinery
-(`daemon/src/transfer/mod.rs`) + `remote.rs::send_file`; drop
-`onFileTransferStart`/`onFileChunk`/`onFileChunkRequest` in
-`pairing_model.dart` + the chunk paths (incl. the OOM-prone
-`_verifyWholeFile`) in `file_transfer_model.dart`; mark the retired
-`SyncFrame` oneof cases + messages `reserved` in the proto; and rewrite
-the chunk-oriented tests (grpc_smoke transfer cases, fault_injection,
-the desktop e2e `send_file` test, the mobile chunk-receive/T-908 tests).
+**Done 2026-07-20, in root `TASKS.md` Phase I (T-I1-I8) -- see that
+file for the full account.** All three landed exactly as the plan below
+described: chunk handling removed from `SyncStream`
+(`daemon/src/grpc/service.rs`) + `TransferManager` (`daemon/src/
+transfer/mod.rs`) + `remote.rs::send_file`; `onFileTransferStart`/
+`onFileChunk`/`onFileChunkRequest` dropped from `pairing_model.dart` +
+the chunk paths (incl. `_verifyWholeFile`) from `file_transfer_model.
+dart`; the retired `SyncFrame` oneof cases + messages marked `reserved`
+in the proto; every chunk-oriented test rewritten, ported, or
+deleted (grpc_smoke transfer cases, fault_injection.rs deleted
+entirely, the desktop e2e `send_file` test, the mobile chunk-receive/
+T-908 tests).
+
+**Important deviation from this section's own original gating
+condition, flagged explicitly rather than silently glossed over:** this
+was written to be gated on **T-A25 (real-device stability
+verification)** below -- Linux <-> Android over real LAN Wi-Fi,
+including a real Wi-Fi-pull-mid-transfer resume test -- specifically so
+a "proven-working" fallback would never be deleted before the
+replacement was confirmed on Luna's actual hardware. T-A25 has **not**
+been run (this sandbox has no phone). Phase I proceeded anyway on the
+strength of the automated test suite (unit + real-TLS integration
+tests, including a resume-after-a-dropped-stream test) staying fully
+green, which is a materially weaker guarantee than T-A25's real-network
++ real-interruption scenario. The old chunk path is no longer available
+as a fallback if something real-world-specific turns out to be wrong
+with the dedicated path's resume behavior. **Recommend running T-A25
+for real soon** -- it's now the only thing standing between "the
+automated tests pass" and "file transfer actually holds up on Luna's
+own phone and Wi-Fi," with no safety net left if it doesn't.
 
 ### Progress, errors, polish
 
@@ -512,7 +543,7 @@ auto-apply on/off + live-flip (mock platform clipboard channel);
 ## Phase C - Security hardening for 1.0
 
 ### T-C1: Design the TOFU trust store  `[x]`
-**Done 2026-07-17.** Written design at [`docs/tofu-trust-store.md`](docs/tofu-trust-store.md):
+**Done 2026-07-17.** Written design at [`docs/tofu-trust-store.md`](../tofu-trust-store.md):
 client-pins-server model (only the client observes a cert; daemon server
 stays `no_client_auth`), fingerprint = `sha256(end_entity_DER)` computed in
 the client verifier (`AcceptSelfSignedCert`), storage reuses the existing
@@ -704,14 +735,14 @@ handler; construct `ClipboardModel` with a 1-hour `pollInterval`; replace
 full mobile suite runs to completion (no multi-minute hang).
 
 ### T-E8 (optional): Developer onboarding guide  `[x]`
-**Done 2026-07-17.** [`docs/developer-guide.md`](docs/developer-guide.md):
+**Done 2026-07-17.** [`docs/developer-guide.md`](../developer-guide.md):
 prerequisites, per-codebase build/run, the `XDG_DATA_HOME`+`CONNECTIBLE_PORT`
 two-daemon local test, System Doctor usage, the proto/gen_proto workflow
 (incl. the mobile-server-override gotcha), test commands + mobile timer
 hygiene, and a PR checklist (ending with a fresh-clone-build reminder).
 
 ### T-E9 (optional): Proto/API doc expansion  `[x]`
-**Done 2026-07-17.** [`docs/api-reference.md`](docs/api-reference.md):
+**Done 2026-07-17.** [`docs/api-reference.md`](../api-reference.md):
 transport/TOFU/loopback model, every RPC group (sync, pairing, streamed
 upload, devices, loopback UI/TOFU/diagnostics) with request/response shape,
 and the full `ErrorCode` table with per-code remediation + where the

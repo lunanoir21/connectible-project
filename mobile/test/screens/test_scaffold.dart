@@ -21,26 +21,27 @@ Widget wrapScreen(
   // hang forever, since it waits for a frame-idle that never comes.
   bool disableAnimations = false,
 }) {
-  return MultiProvider(
-    providers: providers,
-    child: MaterialApp(
-      builder: (context, navigatorChild) {
-        Widget tree = AppPaletteScope(
-          palette: palette,
-          child: AppStringsScope(
-            strings: AppStrings(locale),
-            child: navigatorChild ?? const SizedBox.shrink(),
-          ),
+  final app = MaterialApp(
+    builder: (context, navigatorChild) {
+      Widget tree = AppPaletteScope(
+        palette: palette,
+        child: AppStringsScope(
+          strings: AppStrings(locale),
+          child: navigatorChild ?? const SizedBox.shrink(),
+        ),
+      );
+      if (disableAnimations) {
+        tree = MediaQuery(
+          data: MediaQuery.of(context).copyWith(disableAnimations: true),
+          child: tree,
         );
-        if (disableAnimations) {
-          tree = MediaQuery(
-            data: MediaQuery.of(context).copyWith(disableAnimations: true),
-            child: tree,
-          );
-        }
-        return tree;
-      },
-      home: Scaffold(body: child),
-    ),
+      }
+      return tree;
+    },
+    home: Scaffold(body: child),
   );
+  // `Nested` (MultiProvider's guts) asserts a non-empty provider list, so a
+  // screen with no ChangeNotifier dependencies (e.g. PairLandingScreen)
+  // skips the wrapper entirely rather than passing it an empty list.
+  return providers.isEmpty ? app : MultiProvider(providers: providers, child: app);
 }

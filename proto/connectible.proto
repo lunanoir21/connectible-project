@@ -195,67 +195,6 @@ message RemoteInputEvent {
 }
 
 // ---------------------------------------------------------------------
-// Message 4: FileTransferStart
-// ---------------------------------------------------------------------
-
-// Announces an incoming file before any FileChunk is sent, allowing
-// the receiver to pre-allocate disk space, show a progress UI, and
-// reject the transfer up front (e.g. insufficient disk space, user
-// declines) without wasting bandwidth on chunks.
-message FileTransferStart {
-  // Randomly generated per-transfer identifier correlating this
-  // announcement with the FileChunk stream and any resume request.
-  string transfer_id = 1;
-
-  string file_name = 2;
-
-  int64 file_size_bytes = 3;
-
-  // SHA-256 hex digest of the complete file, verified by the receiver
-  // after the last chunk to catch corruption (see PLAN.md edge cases).
-  string file_hash = 4;
-
-  // Fixed chunk size in bytes this sender will use, so the receiver
-  // can pre-size its write buffer. MVP default is 65536 (65 KB).
-  uint32 chunk_size_bytes = 5;
-
-  // If set, the receiver should attempt to resume a previously
-  // interrupted transfer with this transfer_id starting at
-  // resume_offset_bytes instead of starting from zero (see
-  // FileChunk.offset_bytes and PLAN.md network-interruption handling).
-  int64 resume_offset_bytes = 6;
-
-  string mime_type = 7;
-}
-
-// ---------------------------------------------------------------------
-// Message 5: FileChunk
-// ---------------------------------------------------------------------
-
-// A single resumable chunk of file data. Chunks may be re-sent after a
-// dropped connection; the receiver deduplicates using offset_bytes, so
-// a resend of an already-written offset is a safe no-op overwrite.
-message FileChunk {
-  string transfer_id = 1;
-
-  // Byte offset of `data` within the complete file. Explicit (rather
-  // than an implicit running counter) so chunks can be resumed or
-  // retried out of strict order after a reconnect.
-  int64 offset_bytes = 2;
-
-  bytes data = 3;
-
-  // True on the final chunk of the transfer; triggers hash
-  // verification against FileTransferStart.file_hash on the receiver.
-  bool is_last = 4;
-
-  // CRC32 of this individual chunk's `data`, cheap to compute and lets
-  // the receiver detect a corrupted chunk immediately and request a
-  // re-send of just that chunk instead of failing the whole transfer.
-  uint32 chunk_checksum = 5;
-}
-
-// ---------------------------------------------------------------------
 // Message 6: BatteryStatus
 // ---------------------------------------------------------------------
 
@@ -321,35 +260,22 @@ message Error {
 }
 
 // ---------------------------------------------------------------------
-// Message 9: FileChunkRequest
-// ---------------------------------------------------------------------
-
-// Sent by the receiver back to the sender when a FileChunk fails its
-// CRC32 check, asking for that one chunk to be resent rather than
-// aborting or falling back to a full resume-from-offset. The sender
-// treats this exactly like a fresh FileChunk send at offset_bytes.
-message FileChunkRequest {
-  string transfer_id = 1;
-  int64 offset_bytes = 2;
-}
-
-// ---------------------------------------------------------------------
 // Dedicated file upload (LocalSend-style, v1.0)
 // ---------------------------------------------------------------------
 //
 // Bulk file bytes travel over their own RPCs (PrepareUpload + UploadFile,
-// see the service definition), NOT multiplexed onto the SyncStream the
-// way FileTransferStart/FileChunk above are. This decouples large
-// transfers from the real-time control channel (a control reconnect no
-// longer kills a transfer), gets TCP/HTTP-2 backpressure for free
-// (the sender awaits each streamed chunk), and lets the receiver write
-// straight to disk while folding a streaming SHA-256 -- no per-chunk
-// CRC32 resend loop and no buffering the whole file in RAM to verify it.
-// Modeled on LocalSend's prepare-upload/upload two-step but carried on
-// our own TLS 1.3 + paired-device identity, and strengthened with
-// offset-based resume (LocalSend restarts). Once these fully replace the
-// chunk path (TASKS.md Phase A cutover), FileTransferStart/FileChunk/
-// FileChunkRequest and their SyncFrame cases become reserved.
+// see the service definition), NOT multiplexed onto the SyncStream.
+// This decouples large transfers from the real-time control channel (a
+// control reconnect no longer kills a transfer), gets TCP/HTTP-2
+// backpressure for free (the sender awaits each streamed chunk), and
+// lets the receiver write straight to disk while folding a streaming
+// SHA-256 -- no per-chunk CRC32 resend loop and no buffering the whole
+// file in RAM to verify it. Modeled on LocalSend's prepare-upload/
+// upload two-step but carried on our own TLS 1.3 + paired-device
+// identity, and strengthened with offset-based resume (LocalSend
+// restarts). This fully replaced the old chunk-over-SyncStream path in
+// Phase I (v1.0) -- FileTransferStart/FileChunk/FileChunkRequest and
+// their SyncFrame cases are gone, see SyncFrame's own `reserved`.
 
 // One file's metadata, declared up front so the receiver can accept or
 // decline (disk space, receiving disabled, unpaired sender) and report
@@ -488,6 +414,17 @@ message ConfirmPinResponse {
   Error error = 2;
 }
 
+message PreArmPairingCodeRequest {}
+
+message PreArmPairingCodeResponse {
+  // Same 6-ASCII-digit format as ConfirmPinRequest.pin_code -- this IS
+  // the PIN a subsequent Pair call will be checked against, not a
+  // placeholder.
+  string pin_code = 1;
+  int64 pin_expires_at_ms = 2;
+  Error error = 3;
+}
+
 message ListDevicesRequest {
   // If true, only return devices currently reachable on the local
   // network (mDNS-visible or an open connection); if false, return
@@ -560,16 +497,24 @@ message PongRequest {
 // format extensible -- adding SyncFrame case 9 later does not break
 // old parsers, which simply see an unset oneof).
 message SyncFrame {
+  // Phase I (v1.0): the chunk-over-SyncStream file transfer path
+  // (FileTransferStart/FileChunk/FileChunkRequest, cases 3, 4, 9) was
+  // fully replaced by the dedicated PrepareUpload/UploadFile RPCs (see
+  // "Dedicated file upload" below) and removed from every
+  // implementation (daemon, desktop, mobile). Reserved, not reused --
+  // an old binary that somehow still sent one of these would otherwise
+  // have its frame silently misinterpreted as whatever new field a
+  // future change gave the same number.
+  reserved 3, 4, 9;
+  reserved "file_transfer_start", "file_chunk", "file_chunk_request";
+
   oneof payload {
     ClipboardData clipboard = 1;
     RemoteInputEvent input_event = 2;
-    FileTransferStart file_transfer_start = 3;
-    FileChunk file_chunk = 4;
     BatteryStatus battery_status = 5;
     NotificationData notification = 6;
     Error error = 7;
     Identity identity = 8; // re-sent identity refresh, see Identity comment
-    FileChunkRequest file_chunk_request = 9; // new, additive (T-306)
   }
 }
 
@@ -605,6 +550,15 @@ message PairingRequestedLocalEvent {
   int64 pin_expires_at_ms = 4;
 }
 
+// Emitted the moment a pending PIN is *successfully* confirmed, so the
+// responder side's PIN dialog -- which otherwise has no way to learn
+// the requester got it right -- can show a success beat and close
+// instead of sitting on the code until it expires.
+message PairingCompletedLocalEvent {
+  string requester_device_id = 1;
+  string requester_device_name = 2;
+}
+
 // One entry of the daemon's in-memory clipboard ring buffer (T-023),
 // exposed for the desktop UI's clipboard history panel (T-037).
 message ClipboardHistoryEntry {
@@ -631,6 +585,11 @@ message TransferProgress {
   // Exactly one of completed/failed is set on the final event.
   bool completed = 5;
   bool failed = 6;
+  // Sender-declared content type (UploadFileMeta.mime_type), forwarded
+  // as-is so the UI can pick a file-type icon without re-sniffing the
+  // extension. Empty when the sender didn't declare one, or (currently)
+  // for an outgoing transfer's own progress events.
+  string mime_type = 7;
 }
 
 // One event on the SubscribeLocalEvents stream. Same oneof-envelope
@@ -642,6 +601,7 @@ message LocalEvent {
     NotificationData notification = 3;
     ClipboardHistoryEntry clipboard = 4;
     TransferProgress transfer_progress = 5;
+    PairingCompletedLocalEvent pairing_completed = 6;
   }
 }
 
@@ -740,6 +700,54 @@ message RecordFingerprintRequest {
 message RecordFingerprintResponse {
   // False if the device_id is not a known paired device (nothing pinned).
   bool recorded = 1;
+}
+
+// ---------------------------------------------------------------------
+// Persisted transfer history (Phase J)
+// ---------------------------------------------------------------------
+//
+// The daemon owns one durable record of every transfer it has visibility
+// into. "Incoming" transfers (a peer pushes a file to this machine) are
+// observed directly by the daemon's own UploadFile handler. "Outgoing"
+// transfers (this machine sends a file to a peer) are driven by the UI
+// process connecting straight to the *remote* peer's daemon -- this
+// daemon has no visibility into them at all -- so RecordTransferHistory
+// exists for the local UI to report an outgoing transfer's outcome back
+// into this daemon's own store after the fact.
+
+message TransferHistoryEntry {
+  string transfer_id = 1;
+  string peer_device_id = 2;
+  string file_name = 3;
+  int64 total_bytes = 4;
+  // "incoming" | "outgoing".
+  string direction = 5;
+  // "completed" | "failed" | "canceled".
+  string status = 6;
+  int64 started_at_ms = 7;
+  int64 finished_at_ms = 8;
+}
+
+// Loopback-only: the local UI reports the outcome of an outgoing send it
+// drove itself (see RemoteDeviceClient::upload_file), since the daemon
+// otherwise never observes it. Non-loopback callers receive
+// PERMISSION_DENIED.
+message RecordTransferHistoryRequest {
+  TransferHistoryEntry entry = 1;
+}
+
+message RecordTransferHistoryResponse {}
+
+// Loopback-only: paginated read of persisted transfer history (both
+// directions). Non-loopback callers receive PERMISSION_DENIED.
+message ListTransferHistoryRequest {
+  // 0 = a sensible daemon-chosen default.
+  int32 limit = 1;
+}
+
+message ListTransferHistoryResponse {
+  // Most recent first.
+  repeated TransferHistoryEntry entries = 1;
 }
 
 // ---------------------------------------------------------------------
@@ -861,4 +869,26 @@ service Connectible {
   // `connectibled doctor` CLI stay in lockstep. Non-loopback callers
   // receive PERMISSION_DENIED.
   rpc RunDiagnostics(RunDiagnosticsRequest) returns (RunDiagnosticsResponse);
+
+  // Loopback-only: pre-generates a PIN with no requester known yet, so
+  // the local UI can embed it in a pairing QR code (scan-to-pair,
+  // rather than reading the code off the other device's screen). The
+  // next `Pair` call from anywhere consumes it in place of minting a
+  // fresh random PIN, so `ConfirmPin` needs no changes -- the code
+  // baked into the QR is exactly the code the daemon will check.
+  // One-shot: generating a new code invalidates a previous unused one.
+  // Non-loopback callers receive PERMISSION_DENIED.
+  rpc PreArmPairingCode(PreArmPairingCodeRequest) returns (PreArmPairingCodeResponse);
+
+  // Loopback-only (Phase J): the local UI reports the outcome of an
+  // outgoing send it drove itself directly against a remote peer's
+  // daemon (see the message doc above -- this daemon never observes
+  // that transfer any other way). Non-loopback callers receive
+  // PERMISSION_DENIED.
+  rpc RecordTransferHistory(RecordTransferHistoryRequest) returns (RecordTransferHistoryResponse);
+
+  // Loopback-only (Phase J): paginated read of persisted transfer
+  // history (both directions). Non-loopback callers receive
+  // PERMISSION_DENIED.
+  rpc ListTransferHistory(ListTransferHistoryRequest) returns (ListTransferHistoryResponse);
 }

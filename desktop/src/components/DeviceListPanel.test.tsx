@@ -33,6 +33,10 @@ describe("DeviceListPanel", () => {
   beforeEach(() => {
     pairWithDevice.mockReset();
     forgetDevice.mockReset();
+    // Forgetting now asks for confirmation first; default to "confirmed"
+    // so the existing forget tests exercise the same flow as before.
+    // The dedicated cancel test below overrides this per-call.
+    vi.spyOn(window, "confirm").mockReturnValue(true);
   });
 
   it("shows a distinct empty state when there are no devices and loading has finished", () => {
@@ -119,6 +123,17 @@ describe("DeviceListPanel", () => {
 
     await waitFor(() => expect(onRefresh).toHaveBeenCalled());
     expect(forgetDevice).toHaveBeenCalledWith("d1");
+  });
+
+  it("does not forget a device when the confirmation is dismissed", () => {
+    vi.spyOn(window, "confirm").mockReturnValue(false);
+    render(
+      <DeviceListPanel devices={paired} nearby={[]} loading={false} onPairStarted={vi.fn()} onRefresh={vi.fn()} />,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Forget device" }));
+
+    expect(forgetDevice).not.toHaveBeenCalled();
   });
 
   it("surfaces a forget error instead of throwing, mapped from its ErrorCode (T-602)", async () => {

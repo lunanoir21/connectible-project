@@ -1,5 +1,5 @@
 // ErrorCode -> user-facing message mapping (T-602), implementing the
-// design in design-docs/error-code-mapping.md. Mirrors
+// design in docs/design/error-code-mapping.md. Mirrors
 // proto/connectible.proto's `ErrorCode` enum as a hand-written string
 // union rather than generated code -- the enum is small and stable, so
 // per the design doc it is kept in sync by hand across desktop/mobile.

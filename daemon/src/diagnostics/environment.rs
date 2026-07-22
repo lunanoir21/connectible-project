@@ -18,6 +18,7 @@ pub fn checks() -> Vec<Box<dyn Check>> {
         Box::new(DirectoryWritable::transfers()),
         Box::new(DownloadDirWritable),
         Box::new(DiskSpace),
+        Box::new(DbEncryptionKeySource),
     ]
 }
 
@@ -164,6 +165,55 @@ impl Check for DiskSpace {
             None => CheckResult::ok(self, "Free space unknown")
                 .detail("Could not determine free space for the download volume.")
                 .with_data("path", dir.display().to_string()),
+        }
+    }
+}
+
+/// Phase H, T-H6: reports which source provided the `devices.
+/// cert_fingerprint` column-encryption key. Re-derives the source by
+/// calling the same `load_or_create_db_key` the daemon used at startup
+/// (idempotent -- reads the same key back rather than regenerating),
+/// so this doesn't need any additional state threaded through
+/// `DiagnosticsContext`. `warn`, not `error`, on the fallback file --
+/// that path is fully functional, just less ideal than a real keyring,
+/// and expected on a headless systemd service (T-H3).
+pub struct DbEncryptionKeySource;
+
+#[async_trait]
+impl Check for DbEncryptionKeySource {
+    fn id(&self) -> &'static str {
+        "db-encryption-key-source"
+    }
+    fn title(&self) -> &'static str {
+        "Database encryption key source"
+    }
+    fn category(&self) -> Category {
+        Category::Environment
+    }
+    async fn run(&self, ctx: &DiagnosticsContext) -> CheckResult {
+        match crate::db::keys::load_or_create_db_key(&ctx.config).await {
+            Ok(key) => {
+                let base = CheckResult::ok(self, key.source.as_str())
+                    .with_data("source", key.source.as_str());
+                match key.source {
+                    crate::db::keys::KeySource::FallbackFile => base
+                        .warn("Using the local fallback key file, not the OS keyring")
+                        .remediation(
+                            "Expected for a headless systemd service with no session bus. On a \
+                             desktop session, check that a Secret Service provider (GNOME \
+                             Keyring, KWallet, ...) is running if you expected keyring-backed \
+                             storage instead.",
+                        ),
+                    _ => base,
+                }
+            }
+            Err(e) => CheckResult::ok(self, "Could not determine or create an encryption key")
+                .error("Database encryption key unavailable")
+                .detail(e.to_string())
+                .remediation(
+                    "Check permissions on the TLS directory (fallback key file location) and, \
+                     if using CONNECTIBLE_DB_KEY_FILE, that the path is valid.",
+                ),
         }
     }
 }

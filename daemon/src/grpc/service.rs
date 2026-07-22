@@ -20,20 +20,24 @@ use crate::proto::connectible::v1::sync_frame::Payload;
 use crate::proto::connectible::v1::{
     local_event, ClipboardHistoryEntry as ProtoClipboardHistoryEntry, ConfirmPinRequest,
     ConfirmPinResponse, DeviceInfo, DeviceType, DisconnectDeviceRequest, DisconnectDeviceResponse,
-    Error as ProtoError, ErrorCode, FileChunkRequest, ForgetDeviceRequest, ForgetDeviceResponse,
+    Error as ProtoError, ErrorCode, ForgetDeviceRequest, ForgetDeviceResponse,
     DiagnosticCheck, GetLocalStateRequest, GetLocalStateResponse, GetPinnedFingerprintRequest,
     GetPinnedFingerprintResponse, ListDevicesRequest, ListDevicesResponse,
     RecordFingerprintRequest, RecordFingerprintResponse, RunDiagnosticsRequest,
     RunDiagnosticsResponse,
     LocalEvent, LocalEventsRequest, NearbyDevice, PairRequest, PairResponse,
-    PairingRequestedLocalEvent, PingRequest, Platform, PongRequest, PrepareUploadRequest,
+    PairingCompletedLocalEvent, PairingRequestedLocalEvent, PingRequest, Platform, PongRequest,
+    PreArmPairingCodeRequest,
+    PreArmPairingCodeResponse, PrepareUploadRequest,
     PrepareUploadResponse, SetClipboardSyncEnabledRequest, SetClipboardSyncEnabledResponse,
-    SetRemoteInputEnabledRequest, SetRemoteInputEnabledResponse, SyncFrame, UploadFileOffer,
+    SetRemoteInputEnabledRequest, SetRemoteInputEnabledResponse, SyncFrame, TransferHistoryEntry,
+    RecordTransferHistoryRequest, RecordTransferHistoryResponse, ListTransferHistoryRequest,
+    ListTransferHistoryResponse, UploadFileOffer,
     UploadFilePart, UploadFileResult,
 };
 use crate::status::{StatusEvent, StatusHub};
 use crate::transfer::upload::UploadRegistry;
-use crate::transfer::{self, TransferManager};
+use crate::transfer::TransferManager;
 use crate::{config::Config, discovery::DiscoveryTable, error::DaemonError};
 
 /// Registry of currently-open `SyncStream` connections' outbound
@@ -146,6 +150,12 @@ pub struct ConnectibleService {
     pub config: Config,
     pub local_device_id: String,
     pub devices: DeviceRepository,
+    /// Persisted transfer history (Phase J). Incoming rows are written
+    /// directly by `upload_file`; outgoing rows arrive via the
+    /// loopback-only `RecordTransferHistory` RPC, since an outgoing
+    /// send is driven by the UI process talking straight to a remote
+    /// peer's daemon and this daemon never otherwise observes it.
+    pub transfer_history: crate::db::TransferHistoryRepository,
     pub pairing: Arc<PairingManager>,
     pub discovery: DiscoveryTable,
     pub peers: PeerRegistry,
@@ -182,6 +192,23 @@ pub const PREPARE_PER_PEER: u32 = 60;
 pub const PREPARE_WINDOW: std::time::Duration = std::time::Duration::from_secs(60);
 pub const PREPARE_MAX_PEERS: usize = 1024;
 
+/// T-security: max files a single `PrepareUpload` call may list. Bounds
+/// how many permanent registry tickets one request can mint --
+/// `PREPARE_PER_PEER`/`PREPARE_WINDOW` only bound call *frequency*, not
+/// the size of an individual call. Generous vs. any real "send a folder"
+/// use case.
+pub const MAX_FILES_PER_PREPARE: usize = 500;
+
+/// Outcome of [`ConnectibleService::verify_peer_identity`] (Phase G,
+/// T-G5). Kept as a distinct type from `bool` so every call site is
+/// forced to choose the right rejection reason/error code rather than
+/// collapsing both failure modes into one generic "not paired".
+enum PeerIdentityCheck {
+    Ok,
+    NotPaired,
+    FingerprintMismatch,
+}
+
 type SyncStreamOut = Pin<Box<dyn Stream<Item = Result<SyncFrame, Status>> + Send + 'static>>;
 type LocalEventsOut = Pin<Box<dyn Stream<Item = Result<LocalEvent, Status>> + Send + 'static>>;
 
@@ -194,6 +221,77 @@ impl ConnectibleService {
     /// data-dir path so received files land where the user can find them.
     fn downloads_dir(&self) -> std::path::PathBuf {
         crate::config::resolve_download_dir(&self.config.data_dir)
+    }
+
+    /// The combined pairing + identity check every paired-only RPC or
+    /// SyncStream frame must pass (Phase G, T-G5): `device_id` must (a)
+    /// actually be paired, and (b) if a client-cert fingerprint is
+    /// pinned for it (T-G4), the connection's presented fingerprint
+    /// must match. A pinned device presenting a different -- or no --
+    /// fingerprint is `FingerprintMismatch`, distinct from `NotPaired`,
+    /// since the device *is* paired; this specific connection just
+    /// isn't provably it (spoofed device_id, or a genuine re-key that
+    /// needs re-pairing). A paired device with nothing pinned yet
+    /// (pre-Phase-G, or paired before its first fingerprint-bearing
+    /// reconnect) passes on the paired check alone -- the one-time
+    /// backfill grace window every other TOFU path in this codebase
+    /// already gives a never-pinned device.
+    async fn verify_peer_identity(
+        &self,
+        device_id: &str,
+        client_fingerprint: Option<&str>,
+    ) -> PeerIdentityCheck {
+        if device_id.is_empty() || !matches!(self.devices.is_paired(device_id).await, Ok(true)) {
+            return PeerIdentityCheck::NotPaired;
+        }
+        if let Ok(Some(pinned)) = self.devices.fingerprint(device_id).await {
+            if client_fingerprint != Some(pinned.as_str()) {
+                return PeerIdentityCheck::FingerprintMismatch;
+            }
+        }
+        PeerIdentityCheck::Ok
+    }
+
+    /// Persists one terminal `upload_file` outcome (Phase J, T-J2a) as
+    /// an `incoming` `transfer_history` row. Best-effort: a DB write
+    /// failure here must not fail the RPC the file itself already
+    /// completed (or failed) on its own terms -- it only means this one
+    /// history entry is missing, logged rather than propagated.
+    async fn record_incoming_transfer_history(
+        &self,
+        ticket: &crate::transfer::upload::UploadTicket,
+        status: &str,
+        started_at_ms: i64,
+    ) {
+        let entry = crate::db::NewTransferHistoryEntry {
+            transfer_id: ticket.file_id.clone(),
+            peer_device_id: ticket.device_id.clone(),
+            file_name: ticket.file_name.clone(),
+            total_bytes: ticket.total_bytes,
+            direction: "incoming".to_string(),
+            status: status.to_string(),
+            started_at_ms,
+            finished_at_ms: pairing::now_ms(),
+        };
+        if let Err(e) = self.transfer_history.record(&entry).await {
+            warn!(error = %e, file_id = %ticket.file_id, "failed to persist incoming transfer history");
+        }
+    }
+
+    /// Persists both UI toggle states (T-X12) to the daemon's data dir so
+    /// a user's clipboard-sync / remote-input choices survive a restart.
+    /// Writes the current state of BOTH toggles (whichever handler called
+    /// this only changed one), so the file is always self-consistent.
+    /// Best-effort: a write failure leaves the in-memory state correct
+    /// for this run and is only logged, never surfaced to the caller.
+    fn persist_ui_toggles(&self) {
+        let toggles = crate::config::UiToggles {
+            clipboard_sync_enabled: self.clipboard_sync_enabled.load(Ordering::Relaxed),
+            remote_input_enabled: self.input.as_ref().is_none_or(|d| d.is_enabled()),
+        };
+        if let Err(e) = crate::config::write_ui_toggles(&self.config.data_dir, toggles) {
+            warn!(error = %e, "failed to persist UI toggle states");
+        }
     }
 
     /// Dispatches one `SyncFrame` payload received on an open
@@ -209,7 +307,50 @@ impl ConnectibleService {
         tx: &Sender<SyncFrame>,
         peer_device_id: &mut String,
         conn_id: u64,
+        client_fingerprint: Option<&str>,
     ) -> bool {
+        // Every frame except Identity requires the sender to already be a
+        // paired device whose connection identity checks out (Phase G,
+        // T-G5). Identity itself is exempt (it's what lets a fresh
+        // connection attribute itself in the first place); by the time a
+        // legitimate peer opens SyncStream at all, ConfirmPin has already
+        // run (see PairingModel::_activate / RemoteDeviceClient on both
+        // clients), so a genuinely paired peer is never blocked here.
+        // Fail closed: an empty peer_device_id (no Identity frame yet), a
+        // paired-state lookup error, or a client-cert fingerprint that
+        // does not match what was pinned at pairing time are all treated
+        // as not-authorized -- without this, any device that merely
+        // completes a TLS handshake (or that knows a paired peer's
+        // device_id and claims it) could push clipboard writes or input
+        // events into an unrelated machine it was never paired with.
+        if !matches!(payload, Payload::Identity(_)) {
+            match self
+                .verify_peer_identity(peer_device_id, client_fingerprint)
+                .await
+            {
+                PeerIdentityCheck::Ok => {}
+                PeerIdentityCheck::NotPaired => {
+                    warn!(device_id = %peer_device_id, "rejecting SyncStream frame from an unpaired/unidentified peer");
+                    return send_error(
+                        tx,
+                        ErrorCode::Unauthenticated,
+                        "this connection is not paired".to_string(),
+                    )
+                    .await;
+                }
+                PeerIdentityCheck::FingerprintMismatch => {
+                    warn!(device_id = %peer_device_id, "rejecting SyncStream frame: client certificate does not match the pinned fingerprint");
+                    return send_error(
+                        tx,
+                        ErrorCode::FingerprintChanged,
+                        "this device's identity does not match what was pinned during pairing"
+                            .to_string(),
+                    )
+                    .await;
+                }
+            }
+        }
+
         match payload {
             Payload::Identity(identity) => {
                 *peer_device_id = identity.device_id.clone();
@@ -257,91 +398,6 @@ impl ConnectibleService {
                 true
             }
 
-            Payload::FileTransferStart(start) => {
-                if let Err(e) = self.transfers.begin(&start).await {
-                    warn!(error = %e, transfer_id = %start.transfer_id, "failed to begin file transfer");
-                    return send_error(tx, ErrorCode::FileTransferFailed, e.to_string()).await;
-                }
-                true
-            }
-
-            Payload::FileChunk(chunk) => {
-                let dest_dir = self.downloads_dir();
-                match self.transfers.write_chunk(&chunk, &dest_dir).await {
-                    Ok(transfer::ChunkOutcome::InProgress) => true,
-                    Ok(transfer::ChunkOutcome::Finished(path)) => {
-                        info!(path = %path.display(), transfer_id = %chunk.transfer_id, "file transfer complete");
-                        true
-                    }
-                    Ok(transfer::ChunkOutcome::Corrupted) => {
-                        // T-306: ask the sender to resend just this one
-                        // chunk instead of failing the whole transfer,
-                        // bounded by MAX_CHUNK_RESEND_ATTEMPTS per
-                        // offset (note_corrupt_chunk tracks that count).
-                        // Once the bound is hit, fall back to the
-                        // original whole-transfer abort.
-                        if self
-                            .transfers
-                            .note_corrupt_chunk(&chunk.transfer_id, chunk.offset_bytes)
-                        {
-                            warn!(transfer_id = %chunk.transfer_id, offset_bytes = chunk.offset_bytes, "chunk failed CRC32 check; requesting resend");
-                            send_file_chunk_request(tx, &chunk.transfer_id, chunk.offset_bytes)
-                                .await
-                        } else {
-                            warn!(transfer_id = %chunk.transfer_id, offset_bytes = chunk.offset_bytes, "chunk resend attempts exhausted; aborting transfer");
-                            send_error(
-                                tx,
-                                ErrorCode::ChecksumMismatch,
-                                format!("transfer {} failed verification", chunk.transfer_id),
-                            )
-                            .await
-                        }
-                    }
-                    Ok(transfer::ChunkOutcome::WholeFileHashMismatch) => {
-                        // Every individual chunk passed its own CRC32
-                        // check, but the assembled whole-file SHA-256
-                        // still does not match -- unlike `Corrupted`,
-                        // `finalize` has already deleted the partial
-                        // file and forgotten this transfer by the time
-                        // this is returned, so there is nothing left to
-                        // resend a specific offset of. Fall back to the
-                        // original whole-transfer abort (T-306: this is
-                        // the pre-existing behavior, unchanged).
-                        warn!(transfer_id = %chunk.transfer_id, "whole-file hash mismatch after every chunk passed CRC32; aborting transfer");
-                        send_error(
-                            tx,
-                            ErrorCode::ChecksumMismatch,
-                            format!("transfer {} failed verification", chunk.transfer_id),
-                        )
-                        .await
-                    }
-                    Err(e) => {
-                        warn!(error = %e, transfer_id = %chunk.transfer_id, "failed to write file chunk");
-                        send_error(tx, ErrorCode::FileTransferFailed, e.to_string()).await
-                    }
-                }
-            }
-
-            // T-306: a peer asking this connection to resend a specific
-            // chunk it already sent. The daemon's SyncStream server role
-            // only ever *receives* files pushed by a connecting peer
-            // (outgoing sends are always made by dialing out as a
-            // client -- see desktop/core/src/remote.rs's
-            // RemoteDeviceClient::send_file, which is what actually
-            // services FileChunkRequest via
-            // transfer::send_file_with_resend); there is no in-progress
-            // outgoing send attached to a server-side connection for
-            // this to act on, so this is a documented no-op rather than
-            // an error.
-            Payload::FileChunkRequest(req) => {
-                debug!(
-                    transfer_id = %req.transfer_id,
-                    offset_bytes = req.offset_bytes,
-                    "received a FileChunkRequest on a connection with no active outgoing send to service it"
-                );
-                true
-            }
-
             Payload::InputEvent(event) => {
                 if let Some(dispatcher) = &self.input {
                     dispatcher.enqueue(&event);
@@ -375,22 +431,6 @@ async fn send_error(tx: &Sender<SyncFrame>, code: ErrorCode, message: String) ->
             code: code as i32,
             message,
             details: Default::default(),
-        })),
-    };
-    tx.send(frame).await.is_ok()
-}
-
-/// Sends a `FileChunkRequest` for `offset_bytes` of `transfer_id`
-/// (T-306), asking the peer to resend just that one chunk.
-async fn send_file_chunk_request(
-    tx: &Sender<SyncFrame>,
-    transfer_id: &str,
-    offset_bytes: i64,
-) -> bool {
-    let frame = SyncFrame {
-        payload: Some(Payload::FileChunkRequest(FileChunkRequest {
-            transfer_id: transfer_id.to_string(),
-            offset_bytes,
         })),
     };
     tx.send(frame).await.is_ok()
@@ -462,6 +502,10 @@ impl Connectible for ConnectibleService {
         &self,
         request: Request<Streaming<SyncFrame>>,
     ) -> Result<Response<Self::SyncStreamStream>, Status> {
+        // Captured once, up front, from this connection's TLS session --
+        // every frame on this stream shares the same fingerprint for the
+        // stream's lifetime (Phase G, T-G5).
+        let client_fingerprint = crate::grpc::peer_client_cert_fingerprint(&request);
         let mut inbound = request.into_inner();
         let (tx, rx) = tokio::sync::mpsc::channel(64);
         let peer_id = self.peers.register(tx.clone());
@@ -477,7 +521,13 @@ impl Connectible for ConnectibleService {
                             continue;
                         };
                         if !service
-                            .handle_frame(payload, &tx, &mut peer_device_id, peer_id)
+                            .handle_frame(
+                                payload,
+                                &tx,
+                                &mut peer_device_id,
+                                peer_id,
+                                client_fingerprint.as_deref(),
+                            )
                             .await
                         {
                             break;
@@ -560,6 +610,14 @@ impl Connectible for ConnectibleService {
         &self,
         request: Request<ConfirmPinRequest>,
     ) -> Result<Response<ConfirmPinResponse>, Status> {
+        // Captured before `into_inner()` consumes `request` -- this is the
+        // fingerprint of whatever client certificate the *requester*
+        // presented on the very connection carrying this confirmation
+        // (Phase G, T-G4). Symmetric to the client-side TOFU pin: there,
+        // the connecting device pins the *server's* cert on first use;
+        // here, the responder pins the *client's* cert the first time
+        // that client successfully proves it knows the PIN.
+        let client_fingerprint = crate::grpc::peer_client_cert_fingerprint(&request);
         let req = request.into_inner();
 
         match self.pairing.confirm(&req.device_id, &req.pin_code) {
@@ -586,6 +644,18 @@ impl Connectible for ConnectibleService {
                     .upsert_paired(&identity, pairing::now_ms())
                     .await
                     .map_err(to_status)?;
+
+                if let Some(fingerprint) = client_fingerprint {
+                    // Best-effort: a device presenting no client cert yet
+                    // (old build, or T-G-phase mid-rollout) still pairs
+                    // successfully -- it just has nothing pinned here,
+                    // same as any pre-Phase-G paired device (T-G5's
+                    // backfill grace covers it on a later reconnect).
+                    if let Err(e) = self.devices.set_fingerprint(&req.device_id, &fingerprint).await
+                    {
+                        warn!(device_id = %req.device_id, error = %e, "failed to pin requester client-cert fingerprint");
+                    }
+                }
 
                 Ok(Response::new(ConfirmPinResponse {
                     verified: true,
@@ -702,22 +772,32 @@ impl Connectible for ConnectibleService {
         &self,
         request: Request<PrepareUploadRequest>,
     ) -> Result<Response<PrepareUploadResponse>, Status> {
+        // Captured before `into_inner()` (Phase G, T-G5).
+        let client_fingerprint = crate::grpc::peer_client_cert_fingerprint(&request);
         let req = request.into_inner();
         let sender = req
             .sender
             .ok_or_else(|| Status::invalid_argument("missing sender identity"))?;
 
-        // Only a paired device may push files here. Reject the whole
-        // session up front rather than per file -- an unpaired sender has
-        // no business learning anything about our disk state.
-        let paired = self
-            .devices
-            .is_paired(&sender.device_id)
+        // Only a paired device whose connection identity checks out may
+        // push files here. Reject the whole session up front rather than
+        // per file -- an unpaired (or spoofed-device_id) sender has no
+        // business learning anything about our disk state.
+        match self
+            .verify_peer_identity(&sender.device_id, client_fingerprint.as_deref())
             .await
-            .map_err(|e| Status::internal(format!("paired-set lookup failed: {e}")))?;
-        if !paired {
-            warn!(device_id = %sender.device_id, "prepare_upload: rejecting unpaired sender");
-            return Err(Status::unauthenticated("device is not paired"));
+        {
+            PeerIdentityCheck::Ok => {}
+            PeerIdentityCheck::NotPaired => {
+                warn!(device_id = %sender.device_id, "prepare_upload: rejecting unpaired sender");
+                return Err(Status::unauthenticated("device is not paired"));
+            }
+            PeerIdentityCheck::FingerprintMismatch => {
+                warn!(device_id = %sender.device_id, "prepare_upload: rejecting sender whose client certificate does not match the pinned fingerprint");
+                return Err(Status::permission_denied(
+                    "this device's identity does not match what was pinned during pairing",
+                ));
+            }
         }
 
         // T-C7: throttle prepare floods per peer (after the paired check, so
@@ -728,6 +808,24 @@ impl Connectible for ConnectibleService {
             return Err(Status::resource_exhausted(
                 "too many transfer requests; slow down",
             ));
+        }
+
+        // T-security: a paired-but-malicious (or just buggy) sender could
+        // otherwise list tens of thousands of files in one call, minting
+        // that many permanent registry tickets in a single request --
+        // the per-peer prepare_limiter above only bounds call *frequency*,
+        // not the size of one call. Reject the whole batch rather than
+        // silently truncating it, so the sender's own file count and the
+        // offers it gets back always agree.
+        if req.files.len() > MAX_FILES_PER_PREPARE {
+            warn!(
+                device_id = %sender.device_id,
+                files = req.files.len(),
+                "prepare_upload: rejecting oversized batch"
+            );
+            return Err(Status::invalid_argument(format!(
+                "at most {MAX_FILES_PER_PREPARE} files per PrepareUpload call"
+            )));
         }
 
         // Group this transfer under a session id (caller-supplied, or one
@@ -742,13 +840,50 @@ impl Connectible for ConnectibleService {
             .files
             .iter()
             .map(|meta| {
-                let (token, resume_offset_bytes) = self.uploads.accept(&session_id, meta);
-                UploadFileOffer {
-                    file_id: meta.file_id.clone(),
-                    accepted: true,
-                    resume_offset_bytes,
-                    token,
-                    reject_reason: String::new(),
+                // T-security: `UploadWriter::finish` only treats a short
+                // stream as `Incomplete` when `total_bytes > 0` -- a
+                // sender declaring `file_size_bytes <= 0` would skip
+                // that guard entirely and finalize on whatever bytes
+                // happened to arrive. Reject the claim up front instead
+                // of relying on a downstream check that only applies to
+                // the positive case.
+                if meta.file_size_bytes <= 0 {
+                    warn!(
+                        device_id = %sender.device_id,
+                        file_id = %meta.file_id,
+                        file_size_bytes = meta.file_size_bytes,
+                        "prepare_upload: rejecting a non-positive declared size"
+                    );
+                    return UploadFileOffer {
+                        file_id: meta.file_id.clone(),
+                        accepted: false,
+                        resume_offset_bytes: 0,
+                        token: String::new(),
+                        reject_reason: ErrorCode::FileTransferFailed.as_str_name().to_string(),
+                    };
+                }
+                match self.uploads.accept(&session_id, &sender.device_id, meta) {
+                    Some((token, resume_offset_bytes)) => UploadFileOffer {
+                        file_id: meta.file_id.clone(),
+                        accepted: true,
+                        resume_offset_bytes,
+                        token,
+                        reject_reason: String::new(),
+                    },
+                    None => {
+                        warn!(
+                            device_id = %sender.device_id,
+                            file_id = %meta.file_id,
+                            "prepare_upload: registry is full, declining this file"
+                        );
+                        UploadFileOffer {
+                            file_id: meta.file_id.clone(),
+                            accepted: false,
+                            resume_offset_bytes: 0,
+                            token: String::new(),
+                            reject_reason: ErrorCode::Internal.as_str_name().to_string(),
+                        }
+                    }
                 }
             })
             .collect();
@@ -798,6 +933,7 @@ impl Connectible for ConnectibleService {
             .uploads
             .resolve(&header.session_id, &header.file_id, &header.token)
             .ok_or_else(|| Status::permission_denied("unknown or mismatched upload token"))?;
+        let started_at_ms = pairing::now_ms();
 
         let mut writer = UploadWriter::open(
             &ticket,
@@ -839,6 +975,8 @@ impl Connectible for ConnectibleService {
                     bytes,
                     "upload_file: completed + verified"
                 );
+                self.record_incoming_transfer_history(&ticket, "completed", started_at_ms)
+                    .await;
                 UploadFileResult {
                     file_id: header.file_id,
                     completed: true,
@@ -849,6 +987,8 @@ impl Connectible for ConnectibleService {
             UploadOutcome::HashMismatch { bytes } => {
                 self.uploads.finish(&header.token);
                 warn!(file_id = %header.file_id, "upload_file: hash mismatch, discarded");
+                self.record_incoming_transfer_history(&ticket, "failed", started_at_ms)
+                    .await;
                 UploadFileResult {
                     file_id: header.file_id,
                     completed: false,
@@ -886,6 +1026,13 @@ impl Connectible for ConnectibleService {
                 requester_device_name: event.requester_device_name,
                 pin_code: event.pin_code,
                 pin_expires_at_ms: event.pin_expires_at_ms,
+            })
+        });
+
+        forward_events(self.pairing.subscribe_completed(), tx.clone(), |event| {
+            local_event::Event::PairingCompleted(PairingCompletedLocalEvent {
+                requester_device_id: event.requester_device_id,
+                requester_device_name: event.requester_device_name,
             })
         });
 
@@ -985,6 +1132,8 @@ impl Connectible for ConnectibleService {
             ));
         };
         dispatcher.set_enabled(enabled);
+        // T-X12: persist so the choice survives a daemon restart.
+        self.persist_ui_toggles();
         info!(
             enabled,
             "set_remote_input_enabled: local UI toggled remote input dispatch"
@@ -1011,6 +1160,8 @@ impl Connectible for ConnectibleService {
         }
         self.clipboard_sync_enabled
             .store(enabled, Ordering::Relaxed);
+        // T-X12: persist so the choice survives a daemon restart.
+        self.persist_ui_toggles();
         info!(
             enabled,
             "set_clipboard_sync_enabled: local UI toggled clipboard sync"
@@ -1108,6 +1259,87 @@ impl Connectible for ConnectibleService {
             worst: worst.as_str().to_string(),
         }))
     }
+
+    /// Loopback-only: pre-generates a PIN for the local UI to embed in a
+    /// pairing QR code -- see `PairingManager::pre_arm`. The requester
+    /// identity isn't known yet (no inbound connection has happened),
+    /// so unlike `pair()` this never touches `self.devices` and never
+    /// fires `PairingRequestedEvent`; that still happens normally, once,
+    /// when someone actually calls `Pair` and consumes the code.
+    async fn pre_arm_pairing_code(
+        &self,
+        request: Request<PreArmPairingCodeRequest>,
+    ) -> Result<Response<PreArmPairingCodeResponse>, Status> {
+        require_loopback(&request)?;
+        let (pin_code, pin_expires_at_ms) = self.pairing.pre_arm();
+        info!("pre_arm_pairing_code: local UI generated a pairing QR code");
+        Ok(Response::new(PreArmPairingCodeResponse {
+            pin_code,
+            pin_expires_at_ms,
+            error: None,
+        }))
+    }
+
+    /// Loopback-only (Phase J, T-J2b): the local UI reports the outcome
+    /// of an outgoing send it drove itself directly against a remote
+    /// peer's daemon (`RemoteDeviceClient::upload_file`) -- this
+    /// daemon otherwise never observes that transfer at all, unlike an
+    /// incoming one (recorded directly by `upload_file` above).
+    async fn record_transfer_history(
+        &self,
+        request: Request<RecordTransferHistoryRequest>,
+    ) -> Result<Response<RecordTransferHistoryResponse>, Status> {
+        require_loopback(&request)?;
+        let entry = request
+            .into_inner()
+            .entry
+            .ok_or_else(|| Status::invalid_argument("missing entry"))?;
+        self.transfer_history
+            .record(&crate::db::NewTransferHistoryEntry {
+                transfer_id: entry.transfer_id,
+                peer_device_id: entry.peer_device_id,
+                file_name: entry.file_name,
+                total_bytes: entry.total_bytes,
+                direction: entry.direction,
+                status: entry.status,
+                started_at_ms: entry.started_at_ms,
+                finished_at_ms: entry.finished_at_ms,
+            })
+            .await
+            .map_err(|e| Status::internal(format!("transfer history write failed: {e}")))?;
+        Ok(Response::new(RecordTransferHistoryResponse {}))
+    }
+
+    /// Loopback-only (Phase J, T-J2b): paginated read of persisted
+    /// transfer history (both directions -- incoming rows written
+    /// directly by `upload_file`, outgoing rows relayed in via
+    /// `record_transfer_history` above).
+    async fn list_transfer_history(
+        &self,
+        request: Request<ListTransferHistoryRequest>,
+    ) -> Result<Response<ListTransferHistoryResponse>, Status> {
+        require_loopback(&request)?;
+        let limit = request.into_inner().limit;
+        let records = self
+            .transfer_history
+            .list(limit as i64)
+            .await
+            .map_err(|e| Status::internal(format!("transfer history read failed: {e}")))?;
+        let entries = records
+            .into_iter()
+            .map(|r| TransferHistoryEntry {
+                transfer_id: r.transfer_id,
+                peer_device_id: r.peer_device_id,
+                file_name: r.file_name,
+                total_bytes: r.total_bytes,
+                direction: r.direction,
+                status: r.status,
+                started_at_ms: r.started_at_ms,
+                finished_at_ms: r.finished_at_ms,
+            })
+            .collect();
+        Ok(Response::new(ListTransferHistoryResponse { entries }))
+    }
 }
 
 /// Converts an engine [`CheckResult`](crate::diagnostics::CheckResult) into
@@ -1195,6 +1427,19 @@ mod tests {
     }
 
     async fn test_service() -> ConnectibleService {
+        test_service_with(PathBuf::from("/tmp"), None, true).await
+    }
+
+    /// Parameterized fixture (T-X12): lets a test pin the `data_dir` (so
+    /// the persisted `ui_toggles` file lands somewhere isolated), wire a
+    /// clipboard backend (so the clipboard-sync toggle RPC is accepted),
+    /// and choose the starting clipboard-sync state (as lib.rs does from
+    /// `load_ui_toggles`). `test_service()` keeps the old defaults.
+    async fn test_service_with(
+        data_dir: PathBuf,
+        clipboard: Option<Arc<ClipboardSync>>,
+        clipboard_sync_enabled: bool,
+    ) -> ConnectibleService {
         let pool = SqlitePoolOptions::new()
             .max_connections(1)
             .connect("sqlite::memory:")
@@ -1207,7 +1452,7 @@ mod tests {
 
         ConnectibleService {
             config: Config {
-                data_dir: PathBuf::from("/tmp"),
+                data_dir,
                 tls_dir: PathBuf::from("/tmp"),
                 transfers_dir: PathBuf::from("/tmp"),
                 db_path: PathBuf::from(":memory:"),
@@ -1215,15 +1460,16 @@ mod tests {
                 device_name: "Test Responder".to_string(),
             },
             local_device_id: "responder-id".to_string(),
-            devices: DeviceRepository::new(pool),
+            devices: DeviceRepository::new(pool.clone(), [9u8; 32]),
+            transfer_history: crate::db::TransferHistoryRepository::new(pool),
             pairing: std::sync::Arc::new(PairingManager::default()),
             discovery: DiscoveryTable::default(),
             peers: PeerRegistry::default(),
-            clipboard: None,
-            clipboard_sync_enabled: Arc::new(AtomicBool::new(true)),
+            clipboard,
+            clipboard_sync_enabled: Arc::new(AtomicBool::new(clipboard_sync_enabled)),
             input: None,
             status: Arc::new(StatusHub::default()),
-            transfers: Arc::new(TransferManager::new(PathBuf::from("/tmp"))),
+            transfers: Arc::new(TransferManager::new()),
             uploads: Arc::new(UploadRegistry::new(PathBuf::from("/tmp"))),
             prepare_limiter: Arc::new(RateLimiter::new(
                 PREPARE_PER_PEER,
@@ -1567,7 +1813,7 @@ mod tests {
         let mut peer = String::from("unknown");
         assert!(
             service
-                .handle_frame(Payload::Identity(real), &tx, &mut peer, conn)
+                .handle_frame(Payload::Identity(real), &tx, &mut peer, conn, None)
                 .await
         );
         let _ = rx.recv().await; // drain the echoed Identity
@@ -1670,6 +1916,40 @@ mod tests {
             .await;
         assert_eq!(
             remote_clipboard_toggle.unwrap_err().code(),
+            tonic::Code::PermissionDenied
+        );
+
+        // Phase J
+        let remote_record_history = service
+            .record_transfer_history(request_from(
+                RecordTransferHistoryRequest {
+                    entry: Some(TransferHistoryEntry {
+                        transfer_id: "t".to_string(),
+                        peer_device_id: "some-device".to_string(),
+                        file_name: "x.bin".to_string(),
+                        total_bytes: 1,
+                        direction: "outgoing".to_string(),
+                        status: "completed".to_string(),
+                        started_at_ms: 0,
+                        finished_at_ms: 1,
+                    }),
+                },
+                remote_peer,
+            ))
+            .await;
+        assert_eq!(
+            remote_record_history.unwrap_err().code(),
+            tonic::Code::PermissionDenied
+        );
+
+        let remote_list_history = service
+            .list_transfer_history(request_from(
+                ListTransferHistoryRequest { limit: 10 },
+                remote_peer,
+            ))
+            .await;
+        assert_eq!(
+            remote_list_history.unwrap_err().code(),
             tonic::Code::PermissionDenied
         );
     }
@@ -1979,7 +2259,7 @@ mod tests {
         };
         assert!(
             with_backend
-                .handle_frame(Payload::Clipboard(incoming), &tx, &mut peer, conn)
+                .handle_frame(Payload::Clipboard(incoming), &tx, &mut peer, conn, None)
                 .await
         );
         drop(rx.try_recv()); // no frame expected either way; just drain
@@ -1992,6 +2272,54 @@ mod tests {
         assert!(
             history.is_empty(),
             "clipboard frame must be ignored while sync is disabled, not applied"
+        );
+    }
+
+    /// T-X12: the clipboard-sync toggle survives a daemon restart. Turn
+    /// it off via the RPC against a clipboard-backed service in an
+    /// isolated data_dir, then rebuild the service the way lib.rs does
+    /// (seed the atomic from `load_ui_toggles`) and confirm GetLocalState
+    /// still reports it off -- not silently re-enabled, which was the
+    /// privacy-expectation break this task fixes.
+    #[tokio::test]
+    async fn clipboard_sync_toggle_persists_across_a_restart() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let loopback: std::net::SocketAddr = "127.0.0.1:50011".parse().unwrap();
+        let clipboard = Arc::new(ClipboardSync::new(Arc::new(NoopClipboardBackend)));
+
+        let first =
+            test_service_with(dir.path().to_path_buf(), Some(clipboard.clone()), true).await;
+        first
+            .set_clipboard_sync_enabled(request_from(
+                SetClipboardSyncEnabledRequest { enabled: false },
+                loopback,
+            ))
+            .await
+            .expect("toggle off");
+
+        // The choice is persisted to disk...
+        assert!(
+            !crate::config::load_ui_toggles(dir.path()).clipboard_sync_enabled,
+            "toggling off must persist to the ui_toggles file"
+        );
+
+        // ...and a freshly-built service seeded from that file (as lib.rs
+        // does at startup) still reports it off.
+        let reloaded = crate::config::load_ui_toggles(dir.path());
+        let restarted = test_service_with(
+            dir.path().to_path_buf(),
+            Some(clipboard),
+            reloaded.clipboard_sync_enabled,
+        )
+        .await;
+        let state = restarted
+            .get_local_state(request_from(GetLocalStateRequest {}, loopback))
+            .await
+            .expect("get_local_state")
+            .into_inner();
+        assert!(
+            !state.clipboard_sync_enabled,
+            "clipboard sync must stay off after a restart, not silently re-enable"
         );
     }
 

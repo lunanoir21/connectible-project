@@ -6,7 +6,7 @@ import { errorCodeMessage } from "../lib/errors";
 import { EmptyState } from "./EmptyState";
 import { ErrorState } from "./ErrorState";
 import { Icon } from "./Icon";
-import { useT } from "../i18n";
+import { useT, useI18n } from "../i18n";
 
 interface DeviceListPanelProps {
   devices: Device[];
@@ -69,6 +69,7 @@ function DeviceListSkeleton() {
 /// Paired + nearby (mDNS) devices with a pair action (T-035).
 export function DeviceListPanel({ devices, nearby, loading, loadError, onPairStarted, onRefresh }: DeviceListPanelProps) {
   const t = useT();
+  const { locale } = useI18n();
   const [pairingId, setPairingId] = useState<string | null>(null);
   const [forgettingId, setForgettingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -93,6 +94,7 @@ export function DeviceListPanel({ devices, nearby, loading, loadError, onPairSta
   /// disappears from `devices` on the next refresh and a future
   /// reconnect needs a fresh PIN exchange.
   async function forgetDevice(device: Device) {
+    if (!window.confirm(t("menu.forgetConfirm"))) return;
     setForgettingId(device.deviceId);
     setError(null);
     const result = await ipc.forgetDevice(device.deviceId);
@@ -150,7 +152,7 @@ export function DeviceListPanel({ devices, nearby, loading, loadError, onPairSta
                     <p className="text-xs text-ink-faint">
                       {device.online
                         ? t("devices.onlineNow")
-                        : t("devices.lastSeen", { time: formatRelativeTime(device.lastSeenMs) })}
+                        : t("devices.lastSeen", { time: formatRelativeTime(device.lastSeenMs, locale) })}
                     </p>
                   </div>
                   <span

@@ -141,6 +141,10 @@ pub struct TransferProgressDto {
     /// desktop app). The proto TransferProgress only describes incoming
     /// transfers; outgoing progress is synthesized by remote.rs.
     pub direction: String,
+    /// Sender-declared content type, forwarded from the daemon's
+    /// TransferProgress (dedicated upload path only -- see the proto
+    /// field's own comment). Empty when unknown.
+    pub mime_type: String,
 }
 
 impl TransferProgressDto {
@@ -154,6 +158,39 @@ impl TransferProgressDto {
             failed: progress.failed,
             canceled: false,
             direction: "incoming".to_string(),
+            mime_type: progress.mime_type,
+        }
+    }
+}
+
+/// Phase J: one persisted `transfer_history` row (both directions --
+/// see `daemon/src/grpc/service.rs`'s `TransferHistoryEntry` doc for
+/// why incoming and outgoing are written through different paths but
+/// land in the same table).
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TransferHistoryEntryDto {
+    pub transfer_id: String,
+    pub peer_device_id: String,
+    pub file_name: String,
+    pub total_bytes: i64,
+    pub direction: String,
+    pub status: String,
+    pub started_at_ms: i64,
+    pub finished_at_ms: i64,
+}
+
+impl From<pb::TransferHistoryEntry> for TransferHistoryEntryDto {
+    fn from(entry: pb::TransferHistoryEntry) -> Self {
+        Self {
+            transfer_id: entry.transfer_id,
+            peer_device_id: entry.peer_device_id,
+            file_name: entry.file_name,
+            total_bytes: entry.total_bytes,
+            direction: entry.direction,
+            status: entry.status,
+            started_at_ms: entry.started_at_ms,
+            finished_at_ms: entry.finished_at_ms,
         }
     }
 }
@@ -178,6 +215,45 @@ impl From<pb::PairingRequestedLocalEvent> for PairingPromptDto {
     }
 }
 
+/// A pre-generated pairing code for a QR (scan-to-pair). `pinCode` is
+/// exactly the PIN a subsequent `Pair`/`ConfirmPin` exchange will
+/// check -- there's no separate confirmation step once it's scanned.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairingCodeDto {
+    pub pin_code: String,
+    pub pin_expires_at_ms: i64,
+}
+
+impl From<pb::PreArmPairingCodeResponse> for PairingCodeDto {
+    fn from(response: pb::PreArmPairingCodeResponse) -> Self {
+        Self {
+            pin_code: response.pin_code,
+            pin_expires_at_ms: response.pin_expires_at_ms,
+        }
+    }
+}
+
+/// Fired once the requester successfully confirms the PIN this device
+/// was showing/sharing (responder side) -- lets that PIN dialog show a
+/// success beat and close instead of sitting on the code until the
+/// countdown expires.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PairingCompletedDto {
+    pub requester_device_id: String,
+    pub requester_device_name: String,
+}
+
+impl From<pb::PairingCompletedLocalEvent> for PairingCompletedDto {
+    fn from(event: pb::PairingCompletedLocalEvent) -> Self {
+        Self {
+            requester_device_id: event.requester_device_id,
+            requester_device_name: event.requester_device_name,
+        }
+    }
+}
+
 /// Tagged union emitted to the frontend as the "local-event" Tauri
 /// event payload; mirrors proto LocalEvent's oneof.
 #[derive(Debug, Clone, Serialize)]
@@ -193,6 +269,8 @@ pub enum LocalEventDto {
     Clipboard { entry: ClipboardEntryDto },
     #[serde(rename_all = "camelCase")]
     TransferProgress { progress: TransferProgressDto },
+    #[serde(rename_all = "camelCase")]
+    PairingCompleted { completion: PairingCompletedDto },
 }
 
 impl LocalEventDto {
@@ -216,6 +294,9 @@ impl LocalEventDto {
             },
             Event::TransferProgress(progress) => Self::TransferProgress {
                 progress: TransferProgressDto::incoming(progress),
+            },
+            Event::PairingCompleted(event) => Self::PairingCompleted {
+                completion: event.into(),
             },
         })
     }

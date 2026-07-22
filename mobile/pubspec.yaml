@@ -35,6 +35,7 @@ dependencies:
   crypto: ^3.0.5 # SHA-256 / clipboard content hashing
   basic_utils: ^5.7.0
   battery_plus: ^6.0.0 # phone battery level/charging -> BatteryStatus (Phase B)
+  mobile_scanner: ^7.3.0
 
 dev_dependencies:
   flutter_test:

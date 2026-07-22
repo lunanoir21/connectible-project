@@ -4,6 +4,8 @@ library;
 import 'dart:async';
 import 'dart:io';
 
+import 'package:fixnum/fixnum.dart';
+import 'package:grpc/grpc.dart';
 import 'package:connectible_mobile/src/generated/connectible.pbgrpc.dart'
     as pb;
 import 'package:connectible_mobile/src/models/models.dart';
@@ -74,20 +76,20 @@ void main() {
   // in this unit test host) -- responder-side coverage below drives
   // ServerDelegate's entry points directly instead, exactly like
   // `remote_input_screen_test.dart` already does for widget tests.
+  // ownIdentityLoader (Phase G, T-G6) is injected the same way, for the
+  // same reason: `startPair`/`reconnectToPeer` now also need this
+  // device's own identity, and the real loader hits the same
+  // unavailable path_provider dependency.
+  final ownIdentity = ServerIdentity.generate();
   PairingModel buildPairing(
     DeviceListModel deviceList, {
     void Function(pb.ClipboardData)? onClipboardFrame,
-    void Function(pb.FileTransferStart)? onFileTransferStart,
-    void Function(pb.FileChunk)? onFileChunk,
-    void Function(pb.FileChunkRequest)? onFileChunkRequest,
   }) =>
       PairingModel(
         deviceList: deviceList,
         onClipboardFrame: onClipboardFrame ?? (_) {},
-        onFileTransferStart: onFileTransferStart ?? (_) {},
-        onFileChunk: onFileChunk ?? (_) {},
-        onFileChunkRequest: onFileChunkRequest ?? (_) {},
         pairableEnabled: false,
+        ownIdentityLoader: () async => ownIdentity,
       );
 
   group('PairingModel - responder (inbound) session lifecycle', () {
@@ -115,20 +117,42 @@ void main() {
     });
 
     test(
-        'dispatches each inbound frame kind to its matching callback exactly '
-        'once', () async {
+        'dispatches a clipboard frame to its callback once the peer has '
+        'identified itself as a paired device (Phase G, T-G6)', () async {
       final deviceList = await buildDeviceList();
       pb.ClipboardData? clip;
-      pb.FileTransferStart? start;
-      pb.FileChunk? chunk;
-      pb.FileChunkRequest? req;
       final pairing = buildPairing(
         deviceList,
         onClipboardFrame: (c) => clip = c,
-        onFileTransferStart: (s) => start = s,
-        onFileChunk: (c) => chunk = c,
-        onFileChunkRequest: (r) => req = r,
       );
+      addTearDown(() {
+        pairing.dispose();
+        deviceList.dispose();
+      });
+      deviceList.addPairedDevice(
+          pb.Identity(deviceId: 'peer-1', deviceName: 'Peer One'));
+
+      final inbound = StreamController<pb.SyncFrame>();
+      final sub = pairing.onInboundSyncStream(inbound.stream).listen((_) {});
+      addTearDown(() {
+        sub.cancel();
+        inbound.close();
+      });
+
+      inbound.add(pb.SyncFrame(identity: pb.Identity(deviceId: 'peer-1')));
+      inbound.add(
+          pb.SyncFrame(clipboard: pb.ClipboardData(content: 'hi'.codeUnits)));
+      await Future<void>.delayed(Duration.zero);
+
+      expect(clip?.content, 'hi'.codeUnits);
+    });
+
+    test(
+        'drops inbound frames from an unidentified or unpaired peer '
+        '(Phase G, T-G6)', () async {
+      final deviceList = await buildDeviceList();
+      pb.ClipboardData? clip;
+      final pairing = buildPairing(deviceList, onClipboardFrame: (c) => clip = c);
       addTearDown(() {
         pairing.dispose();
         deviceList.dispose();
@@ -141,19 +165,18 @@ void main() {
         inbound.close();
       });
 
+      // No Identity frame sent yet: dropped, not attributed to anyone.
       inbound.add(
-          pb.SyncFrame(clipboard: pb.ClipboardData(content: 'hi'.codeUnits)));
-      inbound.add(
-          pb.SyncFrame(fileTransferStart: pb.FileTransferStart(transferId: 't1')));
-      inbound.add(pb.SyncFrame(fileChunk: pb.FileChunk(transferId: 't1')));
-      inbound.add(
-          pb.SyncFrame(fileChunkRequest: pb.FileChunkRequest(transferId: 't1')));
+          pb.SyncFrame(clipboard: pb.ClipboardData(content: 'unattributed'.codeUnits)));
       await Future<void>.delayed(Duration.zero);
+      expect(clip, isNull);
 
-      expect(clip?.content, 'hi'.codeUnits);
-      expect(start?.transferId, 't1');
-      expect(chunk?.transferId, 't1');
-      expect(req?.transferId, 't1');
+      // Identifies as a device that was never paired: still dropped.
+      inbound.add(pb.SyncFrame(identity: pb.Identity(deviceId: 'stranger')));
+      inbound.add(
+          pb.SyncFrame(clipboard: pb.ClipboardData(content: 'unpaired'.codeUnits)));
+      await Future<void>.delayed(Duration.zero);
+      expect(clip, isNull);
     });
 
     test('onPeerPaired/knownDevices delegate straight through to DeviceListModel',
@@ -421,6 +444,146 @@ void main() {
 
       expect(pairing.pendingPairing, isNull);
       expect(pairing.connected, isFalse);
+    });
+
+    test(
+        'confirmPin success persists the peer on the requester side so a '
+        'phone-initiated pairing survives a restart (T-X1)', () async {
+      final r = await startResponder();
+      addTearDown(() => r.server.stop());
+
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final deviceList = DeviceListModel(prefs,
+          deviceName: 'Test Phone', pairableEnabled: false);
+      final pairing = buildPairing(deviceList);
+      addTearDown(() {
+        pairing.dispose();
+        deviceList.dispose();
+      });
+
+      await pairing.startPair(deviceFor(r.port));
+      final pin = r.pairingManager.peekPin(pairing.localIdentity.deviceId)!;
+      expect(await pairing.confirmPin(pin), isTrue);
+
+      // Persisted immediately, with the identity data discovery provided.
+      final row =
+          deviceList.knownDevices().singleWhere((d) => d.deviceId == 'desk-1');
+      expect(row.deviceName, 'Desk');
+      expect(row.platform, 'PLATFORM_LINUX_X11');
+
+      // "Restart": a fresh DeviceListModel over the same prefs still has
+      // the peer in its paired roster (the pre-fix behavior lost it here).
+      final reloaded = DeviceListModel(prefs,
+          deviceName: 'Test Phone', pairableEnabled: false);
+      addTearDown(reloaded.dispose);
+      final restored =
+          reloaded.knownDevices().singleWhere((d) => d.deviceId == 'desk-1');
+      expect(restored.deviceName, 'Desk');
+      expect(restored.platform, 'PLATFORM_LINUX_X11');
+      expect(reloaded.devices.map((d) => d.deviceId), contains('desk-1'));
+    });
+
+    test(
+        'confirmPin success pins the observed TLS fingerprint, and the pin '
+        'survives a restart (requester-side TOFU, T-X2)', () async {
+      final r = await startResponder();
+      addTearDown(() => r.server.stop());
+
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final deviceList = DeviceListModel(prefs,
+          deviceName: 'Test Phone', pairableEnabled: false);
+      final pairing = buildPairing(deviceList);
+      addTearDown(() {
+        pairing.dispose();
+        deviceList.dispose();
+      });
+
+      await pairing.startPair(deviceFor(r.port));
+      final pin = r.pairingManager.peekPin(pairing.localIdentity.deviceId)!;
+      expect(await pairing.confirmPin(pin), isTrue);
+
+      // The post-confirm pin attempt now lands (pre-fix it silently
+      // no-opped because the peer was never in the paired store).
+      final pinned = deviceList.pinnedFingerprint('desk-1');
+      expect(pinned, isNotNull);
+
+      final reloaded = DeviceListModel(prefs,
+          deviceName: 'Test Phone', pairableEnabled: false);
+      addTearDown(reloaded.dispose);
+      expect(reloaded.pinnedFingerprint('desk-1'), pinned);
+    });
+
+    test(
+        'a desktop push is accepted after a phone-initiated pair: '
+        'prepareUpload passes the paired gate and an inbound clipboard '
+        'frame is dispatched (T-X3)', () async {
+      final r = await startResponder();
+      addTearDown(() => r.server.stop());
+
+      final deviceList = await buildDeviceList();
+      pb.ClipboardData? clip;
+      final pairing = PairingModel(
+        deviceList: deviceList,
+        onClipboardFrame: (c) => clip = c,
+        onPrepareUpload: (req) async => pb.PrepareUploadResponse(
+          sessionId: req.sessionId,
+          offers: [
+            for (final f in req.files)
+              pb.UploadFileOffer(fileId: f.fileId, accepted: true),
+          ],
+        ),
+        pairableEnabled: false,
+        ownIdentityLoader: () async => ownIdentity,
+      );
+      addTearDown(() {
+        pairing.dispose();
+        deviceList.dispose();
+      });
+
+      pb.PrepareUploadRequest pushFrom(String senderId) =>
+          pb.PrepareUploadRequest(
+            sender: pb.Identity(deviceId: senderId),
+            sessionId: 'sess-push',
+            files: [
+              pb.UploadFileMeta(
+                fileId: 'file-push',
+                fileName: 'push.bin',
+                fileSizeBytes: Int64(3),
+              ),
+            ],
+          );
+
+      // Before pairing the gate rejects the (not yet paired) desktop.
+      await expectLater(
+          pairing.prepareUpload(pushFrom('desk-1')), throwsA(isA<GrpcError>()));
+
+      await pairing.startPair(deviceFor(r.port));
+      final pin = r.pairingManager.peekPin(pairing.localIdentity.deviceId)!;
+      expect(await pairing.confirmPin(pin), isTrue);
+
+      // After the phone-initiated pair the same push is accepted...
+      final resp = await pairing.prepareUpload(pushFrom('desk-1'));
+      expect(resp.offers.single.accepted, isTrue);
+
+      // ...an unpaired stranger is still rejected...
+      await expectLater(pairing.prepareUpload(pushFrom('stranger')),
+          throwsA(isA<GrpcError>()));
+
+      // ...and an inbound SyncStream clipboard frame from the paired peer
+      // is dispatched instead of dropped.
+      final inbound = StreamController<pb.SyncFrame>();
+      final sub = pairing.onInboundSyncStream(inbound.stream).listen((_) {});
+      addTearDown(() {
+        sub.cancel();
+        inbound.close();
+      });
+      inbound.add(pb.SyncFrame(identity: pb.Identity(deviceId: 'desk-1')));
+      inbound.add(
+          pb.SyncFrame(clipboard: pb.ClipboardData(content: 'push'.codeUnits)));
+      await Future<void>.delayed(Duration.zero);
+      expect(clip?.content, 'push'.codeUnits);
     });
   });
 }

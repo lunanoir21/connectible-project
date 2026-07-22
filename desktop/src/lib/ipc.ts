@@ -17,6 +17,8 @@ import type {
   LocalEvent,
   LocalState,
   PairOutcome,
+  PairingCode,
+  TransferHistoryEntry,
   TransferProgress,
 } from "./types";
 
@@ -132,6 +134,31 @@ export const ipc = {
 
   cancelTransfer: (transferId: string) =>
     call<null>("cancel_transfer", { transferId }),
+
+  // Pre-generates a PIN with no requester known yet, for a pairing QR
+  // code the desktop displays (scan-to-pair). The next Pair call from
+  // anywhere consumes it, so ConfirmPin needs no separate wiring here.
+  preArmPairingCode: () => call<PairingCode>("pre_arm_pairing_code"),
+
+  // Phase J: persisted transfer history (both directions), most recent
+  // first -- survives a daemon restart, unlike the live `transfers` map.
+  listTransferHistory: () => call<TransferHistoryEntry[]>("list_transfer_history"),
+
+  // T-X14: relabel the tray menu in the active language and sync the
+  // clipboard-sync checkbox. Called on mount, on a language switch, and
+  // whenever the clipboard-sync toggle changes. A no-op on a tray-less
+  // host.
+  updateTray: (
+    labels: { show: string; hide: string; syncClipboard: string; quit: string },
+    clipboardSyncEnabled: boolean,
+  ) =>
+    call<null>("update_tray", {
+      show: labels.show,
+      hide: labels.hide,
+      syncClipboard: labels.syncClipboard,
+      quit: labels.quit,
+      clipboardSyncEnabled,
+    }),
 };
 
 // Event subscriptions. Returned promise resolves to the unlisten fn so

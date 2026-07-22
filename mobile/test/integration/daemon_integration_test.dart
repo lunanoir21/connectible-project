@@ -1,14 +1,13 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:math';
 
 import 'package:crypto/crypto.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'package:connectible_mobile/src/services/crc32.dart';
 import 'package:connectible_mobile/src/services/grpc_service.dart';
+import 'package:connectible_mobile/src/services/server_identity.dart';
 import 'package:connectible_mobile/src/generated/connectible.pbgrpc.dart' as pb;
 import 'package:connectible_mobile/src/generated/connectible.pb.dart' as pb;
 
@@ -121,8 +120,15 @@ class _DaemonHarness {
     }
   }
 
-  /// Connects GrpcService to the spawned daemon.
-  Future<GrpcService> connect() => GrpcService.connect('127.0.0.1', _port);
+  /// Connects GrpcService to the spawned daemon. A fresh, in-memory
+  /// identity (Phase G, T-G6) is enough here -- this test never checks
+  /// mobile's *own* identity gets pinned by the daemon, only that the
+  /// existing daemon RPCs still work end to end.
+  Future<GrpcService> connect() => GrpcService.connect(
+        '127.0.0.1',
+        _port,
+        identity: ServerIdentity.generate(),
+      );
 
   /// Returns the received-files directory where the daemon finalizes transfers.
   String get receivedDir => '${_xdgDir.path}/connectibled/received';
@@ -162,60 +168,6 @@ pb.Identity _testIdentity(String deviceId, String name) => pb.Identity(
 
 /// Computes SHA-256 hex of bytes.
 String _sha256Hex(List<int> bytes) => sha256.convert(bytes).toString();
-
-/// Builds a stream of SyncFrames for file transfer (Identity -> Start -> Chunks).
-///
-/// `resumeOffsetBytes` starts the chunk stream partway through the file
-/// (T-025 resume, mirroring what a real sender's remembered offset would
-/// produce). `stopBeforeByte`, if set, ends the stream once that many
-/// bytes have been sent without ever emitting `is_last`, simulating a
-/// dropped connection mid-transfer.
-Stream<pb.SyncFrame> _fileTransferFrames({
-  required String transferId,
-  required List<int> fileBytes,
-  required String fileName,
-  required pb.Identity identity,
-  int resumeOffsetBytes = 0,
-  int? stopBeforeByte,
-}) async* {
-  final fileHash = _sha256Hex(fileBytes);
-  const chunkSize = 65536;
-
-  // Identity frame first.
-  yield pb.SyncFrame(identity: identity);
-
-  // FileTransferStart.
-  yield pb.SyncFrame(
-    fileTransferStart: pb.FileTransferStart(
-      transferId: transferId,
-      fileName: fileName,
-      fileSizeBytes: Int64(fileBytes.length),
-      fileHash: fileHash,
-      chunkSizeBytes: chunkSize,
-      resumeOffsetBytes: Int64(resumeOffsetBytes),
-      mimeType: 'application/octet-stream',
-    ),
-  );
-
-  // Chunks, starting at resumeOffsetBytes.
-  var offset = resumeOffsetBytes;
-  while (offset < fileBytes.length) {
-    if (stopBeforeByte != null && offset >= stopBeforeByte) return;
-    final chunkEnd = (offset + chunkSize).clamp(0, fileBytes.length);
-    final data = fileBytes.sublist(offset, chunkEnd);
-    final isLast = chunkEnd == fileBytes.length;
-    yield pb.SyncFrame(
-      fileChunk: pb.FileChunk(
-        transferId: transferId,
-        offsetBytes: Int64(offset),
-        data: data,
-        isLast: isLast,
-        chunkChecksum: Crc32.compute(data),
-      ),
-    );
-    offset = chunkEnd;
-  }
-}
 
 void main() {
   group('Daemon Integration (requires RUN_DAEMON_INTEGRATION=1)', () {
@@ -302,91 +254,6 @@ void main() {
       } finally {
         await grpc.shutdown();
       }
-    });
-
-    test('file send lands on daemon byte-for-byte', () async {
-      if (harness == null) return;
-      final grpc = await harness!.connect();
-      try {
-        final identity = _testIdentity('test-sender', 'Test Sender');
-        final fileBytes = List<int>.generate(150000, (i) => (i * 31) % 251);
-        final transferId = 'e2e-transfer-${Random.secure().nextInt(1 << 30)}';
-        const fileName = 'payload.bin';
-
-        final outbound = _fileTransferFrames(
-          transferId: transferId,
-          fileBytes: fileBytes,
-          fileName: fileName,
-          identity: identity,
-        );
-
-        final inbound = grpc.raw.syncStream(outbound);
-        // Drain inbound until stream closes (daemon closes after finalize).
-        await inbound.toList();
-
-        // Give finalize a moment to rename .part -> received/
-        await Future<void>.delayed(const Duration(milliseconds: 300));
-
-        // Assert file exists with identical bytes.
-        final receivedDir = harness!.receivedDir;
-        final files = Directory(receivedDir).listSync().whereType<File>().toList();
-        expect(files, isNotEmpty);
-        final receivedBytes = await files.first.readAsBytes();
-        expect(receivedBytes, equals(fileBytes));
-      } finally {
-        await grpc.shutdown();
-      }
-    });
-
-    test('resumed transfer (dropped, retried on a new connection) lands intact', () async {
-      if (harness == null) return;
-      final identity = _testIdentity('test-sender-resume', 'Test Sender Resume');
-      final fileBytes = List<int>.generate(150000, (i) => (i * 17) % 251);
-      final transferId = 'e2e-resume-${Random.secure().nextInt(1 << 30)}';
-      const fileName = 'resume-payload.bin';
-      const splitPoint = 70000; // mid-file, not on a 64KB chunk boundary
-
-      // First "connection": send from the top, drop before finishing.
-      final grpc1 = await harness!.connect();
-      try {
-        final outbound1 = _fileTransferFrames(
-          transferId: transferId,
-          fileBytes: fileBytes,
-          fileName: fileName,
-          identity: identity,
-          stopBeforeByte: splitPoint,
-        );
-        await grpc1.raw.syncStream(outbound1).toList();
-      } finally {
-        await grpc1.shutdown();
-      }
-
-      // Give the daemon a moment to have the partial .part file on disk.
-      await Future<void>.delayed(const Duration(milliseconds: 200));
-
-      // "Reconnect": a brand-new connection, same transfer_id, resuming
-      // from splitPoint -- exactly what a sender that remembered its
-      // last-acked offset would do (T-025).
-      final grpc2 = await harness!.connect();
-      try {
-        final outbound2 = _fileTransferFrames(
-          transferId: transferId,
-          fileBytes: fileBytes,
-          fileName: fileName,
-          identity: identity,
-          resumeOffsetBytes: splitPoint,
-        );
-        await grpc2.raw.syncStream(outbound2).toList();
-      } finally {
-        await grpc2.shutdown();
-      }
-
-      await Future<void>.delayed(const Duration(milliseconds: 300));
-
-      final file = File('${harness!.receivedDir}/$fileName');
-      expect(await file.exists(), isTrue);
-      final receivedBytes = await file.readAsBytes();
-      expect(receivedBytes, equals(fileBytes));
     });
 
     test('clipboard frame round-trips (optional)', () async {

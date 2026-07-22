@@ -5,6 +5,7 @@ import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
 import '../models/models.dart';
+import '../services/save_file_service.dart';
 import '../state/file_transfer_model.dart';
 import '../state/pairing_model.dart';
 import '../i18n/strings.dart';
@@ -17,7 +18,12 @@ import '../widgets/ui.dart';
 /// history, and a "Save to..." that copies a received file out of the
 /// app-private inbox to a user-chosen location via the system picker.
 class TransfersScreen extends StatelessWidget {
-  const TransfersScreen({super.key});
+  const TransfersScreen(
+      {super.key, this.saveFileService = const PlatformSaveFileService()});
+
+  /// "Save to..." backend, injectable so widget tests can fake it;
+  /// production streams through the platform implementation (T-X6).
+  final SaveFileService saveFileService;
 
   Future<void> _pickAndSend(BuildContext context) async {
     final result = await FilePicker.pickFiles();
@@ -31,6 +37,8 @@ class TransfersScreen extends StatelessWidget {
   /// directory to a user-chosen location via the OS document picker
   /// ("Save to..."). Received files otherwise land where the file
   /// manager can't reach them; this is how the user gets them out.
+  /// The copy streams with a bounded buffer (T-X6) -- the receive path
+  /// is deliberately constant-memory, and this exit path now is too.
   Future<void> _saveTo(
       BuildContext context, FileTransferModel model, TransferProgress t) async {
     final s = context.strings;
@@ -41,20 +49,20 @@ class TransfersScreen extends StatelessWidget {
           SnackBar(content: Text(s.t('transfers.saveUnavailable'))));
       return;
     }
-    try {
-      final bytes = await File(path).readAsBytes();
-      final saved = await FilePicker.saveFile(
-        dialogTitle: s.t('transfers.saveTo'),
-        fileName: t.fileName,
-        bytes: bytes,
-      );
-      if (saved != null) {
+    final outcome = await saveFileService.saveAs(
+      sourcePath: path,
+      fileName: t.fileName,
+      dialogTitle: s.t('transfers.saveTo'),
+    );
+    switch (outcome) {
+      case SaveFileOutcome.saved:
+        messenger
+            ?.showSnackBar(SnackBar(content: Text(s.t('transfers.saved'))));
+      case SaveFileOutcome.canceled:
+        break; // user backed out of the picker; nothing to report
+      case SaveFileOutcome.failed:
         messenger?.showSnackBar(
-            SnackBar(content: Text(s.t('transfers.saved'))));
-      }
-    } catch (e) {
-      messenger
-          ?.showSnackBar(SnackBar(content: Text(s.t('transfers.saveFailed'))));
+            SnackBar(content: Text(s.t('transfers.saveFailed'))));
     }
   }
 
@@ -88,7 +96,17 @@ class TransfersScreen extends StatelessWidget {
 
     final rows = model.transfers.values.toList().reversed.toList();
     final active = rows.where((t) => t.active).toList();
-    final history = rows.where((t) => !t.active).toList();
+    final liveHistory = rows.where((t) => !t.active).toList();
+
+    // Phase J: merge in persisted history (survives an app restart,
+    // unlike `model.transfers` which is purely in-memory) -- a
+    // transferId present in both means it just finished this session,
+    // so the live row (richer progress detail) wins.
+    final liveHistoryIds = liveHistory.map((t) => t.transferId).toSet();
+    final persistedRows = model.history
+        .where((h) => !liveHistoryIds.contains(h.transferId))
+        .map(_historyEntryToProgress);
+    final history = [...liveHistory, ...persistedRows];
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -102,7 +120,7 @@ class TransfersScreen extends StatelessWidget {
           ),
         ),
         Expanded(
-          child: rows.isEmpty
+          child: active.isEmpty && history.isEmpty
               ? EmptyState(
                   icon: Icons.swap_vert,
                   title: s.t('transfers.emptyTitle'),
@@ -151,6 +169,22 @@ class TransfersScreen extends StatelessWidget {
 
   String _bytesLine(TransferProgress t) =>
       '${_bytes(t.bytesTransferred)}${t.totalBytes > 0 ? ' / ${_bytes(t.totalBytes)}' : ''}';
+
+  /// Adapts a persisted (Phase J) history entry to the `TransferProgress`
+  /// shape `_TransferTile` already knows how to render. Terminal by
+  /// construction, so `bytesTransferred` is approximated as `totalBytes`.
+  TransferProgress _historyEntryToProgress(TransferHistoryEntry h) {
+    return TransferProgress(
+      transferId: h.transferId,
+      fileName: h.fileName,
+      bytesTransferred: h.totalBytes,
+      totalBytes: h.totalBytes,
+      direction: h.direction,
+      completed: h.status == 'completed',
+      failed: h.status == 'failed' || h.status == 'canceled',
+      canceled: h.status == 'canceled',
+    );
+  }
 }
 
 /// Compact "who am I sending to" card with the single primary Send

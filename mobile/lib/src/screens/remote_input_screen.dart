@@ -199,6 +199,7 @@ class _RemoteInputScreenState extends State<RemoteInputScreen> {
               Expanded(
                 child: _IconBtn(
                   icon: Icons.keyboard_arrow_left,
+                  tooltip: s.t('input.arrowLeft'),
                   onTap: () => _sendSpecialKey(model, _Keysym.left),
                 ),
               ),
@@ -206,6 +207,7 @@ class _RemoteInputScreenState extends State<RemoteInputScreen> {
               Expanded(
                 child: _IconBtn(
                   icon: Icons.keyboard_arrow_up,
+                  tooltip: s.t('input.arrowUp'),
                   onTap: () => _sendSpecialKey(model, _Keysym.up),
                 ),
               ),
@@ -213,6 +215,7 @@ class _RemoteInputScreenState extends State<RemoteInputScreen> {
               Expanded(
                 child: _IconBtn(
                   icon: Icons.keyboard_arrow_down,
+                  tooltip: s.t('input.arrowDown'),
                   onTap: () => _sendSpecialKey(model, _Keysym.down),
                 ),
               ),
@@ -220,6 +223,7 @@ class _RemoteInputScreenState extends State<RemoteInputScreen> {
               Expanded(
                 child: _IconBtn(
                   icon: Icons.keyboard_arrow_right,
+                  tooltip: s.t('input.arrowRight'),
                   onTap: () => _sendSpecialKey(model, _Keysym.right),
                 ),
               ),
@@ -351,24 +355,33 @@ class _Btn extends StatelessWidget {
 }
 
 class _IconBtn extends StatelessWidget {
-  const _IconBtn({required this.icon, required this.onTap});
+  const _IconBtn({required this.icon, required this.onTap, required this.tooltip});
   final IconData icon;
   final VoidCallback onTap;
+
+  /// Icon-only button, so this is the only thing describing what it does
+  /// to a screen reader (or a sighted user who hasn't guessed the icon
+  /// yet) -- a bare `GestureDetector` around an `Icon` has no accessible
+  /// label at all otherwise.
+  final String tooltip;
 
   @override
   Widget build(BuildContext context) {
     final p = context.palette;
-    return GestureDetector(
-      onTap: onTap,
-      child: Container(
-        height: 48,
-        alignment: Alignment.center,
-        decoration: BoxDecoration(
-          color: p.surfaceRaised,
-          borderRadius: BorderRadius.circular(12),
-          border: Border.all(color: p.lineStrong),
+    return Tooltip(
+      message: tooltip,
+      child: GestureDetector(
+        onTap: onTap,
+        child: Container(
+          height: 48,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: p.surfaceRaised,
+            borderRadius: BorderRadius.circular(12),
+            border: Border.all(color: p.lineStrong),
+          ),
+          child: Icon(icon, size: 20, color: p.ink),
         ),
-        child: Icon(icon, size: 20, color: p.ink),
       ),
     );
   }

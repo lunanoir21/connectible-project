@@ -10,12 +10,24 @@ use connectible_desktop_core::remote::new_transfer_id;
 use connectible_desktop_core::{LocalDaemonClient, RemoteDeviceClient};
 use connectibled::config::Config;
 use connectibled::proto::connectible::v1::Identity;
-use sha2::{Digest, Sha256};
 use tokio::sync::Notify;
 
 fn free_port() -> u16 {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind ephemeral port");
     listener.local_addr().expect("local addr").port()
+}
+
+/// A fresh data dir standing in for *this test's own* device identity
+/// (Phase G, T-G3/T-G8): `RemoteDeviceClient` presents whatever
+/// cert/key it finds under `<dir>/tls/` as its outbound TLS client
+/// identity, generating one on first use exactly like a real daemon
+/// does for its server identity -- this is deliberately a *different*
+/// directory from the test daemon's own `config.data_dir` above, since
+/// the client and the daemon it connects to are two distinct devices.
+fn own_identity_dir() -> tempfile::TempDir {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(tmp.path().join("tls")).expect("create tls dir");
+    tmp
 }
 
 fn ui_identity() -> Identity {
@@ -102,7 +114,8 @@ async fn remote_client_pairs_using_pin_from_local_event_stream() {
         .expect("local client");
     let mut events = ui.subscribe_local_events().await.expect("subscribe");
 
-    let remote = RemoteDeviceClient::connect("127.0.0.1", port)
+    let own_dir = own_identity_dir();
+    let remote = RemoteDeviceClient::connect(own_dir.path(), "127.0.0.1", port)
         .await
         .expect("connect with accept-self-signed verifier");
 
@@ -131,65 +144,6 @@ async fn remote_client_pairs_using_pin_from_local_event_stream() {
     assert!(devices.iter().any(|d| d.device_id == "desktop-ui-test"));
 }
 
-#[tokio::test]
-async fn send_file_delivers_intact_file_and_reports_progress() {
-    let (_tmp, config, port) = spawn_test_daemon().await;
-
-    let source_dir = tempfile::tempdir().expect("source dir");
-    let source_path = source_dir.path().join("payload.bin");
-    let payload = vec![0xABu8; 300_000]; // several 64KB chunks
-    std::fs::write(&source_path, &payload).expect("write source file");
-
-    let remote = RemoteDeviceClient::connect("127.0.0.1", port)
-        .await
-        .expect("remote connect");
-
-    let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel(64);
-    remote
-        .send_file(
-            &source_path,
-            ui_identity(),
-            progress_tx,
-            new_transfer_id(),
-            Arc::new(Notify::new()),
-            0,
-        )
-        .await
-        .expect("send_file");
-
-    let mut saw_completed = false;
-    let mut last_bytes = 0;
-    while let Some(progress) = progress_rx.recv().await {
-        assert_eq!(progress.direction, "outgoing");
-        assert!(
-            progress.bytes_transferred >= last_bytes,
-            "progress must be monotonic"
-        );
-        last_bytes = progress.bytes_transferred;
-        if progress.completed {
-            saw_completed = true;
-        }
-    }
-    assert!(
-        saw_completed,
-        "final progress event must be marked completed"
-    );
-    assert_eq!(last_bytes, payload.len() as i64);
-
-    // The daemon finalizes received files under <data_dir>/received.
-    let received_path = config.data_dir.join("received").join("payload.bin");
-    let received = std::fs::read(&received_path).expect("received file exists");
-    let mut expected_hasher = Sha256::new();
-    expected_hasher.update(&payload);
-    let mut actual_hasher = Sha256::new();
-    actual_hasher.update(&received);
-    assert_eq!(
-        hex::encode(actual_hasher.finalize()),
-        hex::encode(expected_hasher.finalize()),
-        "received file must be byte-identical"
-    );
-}
-
 /// The dedicated upload path (PrepareUpload + UploadFile) end to end:
 /// pair first (the new path requires a paired sender), then upload a file
 /// and assert it lands verified on disk with monotonic outgoing progress.
@@ -204,7 +158,8 @@ async fn upload_file_delivers_intact_file_and_reports_progress() {
         .await
         .expect("local client");
     let mut events = ui.subscribe_local_events().await.expect("subscribe");
-    let remote = RemoteDeviceClient::connect("127.0.0.1", port)
+    let own_dir = own_identity_dir();
+    let remote = RemoteDeviceClient::connect(own_dir.path(), "127.0.0.1", port)
         .await
         .expect("remote connect");
     remote.pair(ui_identity()).await.expect("pair rpc");
@@ -273,28 +228,52 @@ async fn cancel_aborts_transfer_and_finalizes_nothing() {
     let source_path = source_dir.path().join("big.bin");
     std::fs::write(&source_path, vec![9u8; 4_000_000]).expect("write source");
 
-    let remote = RemoteDeviceClient::connect("127.0.0.1", port)
+    // Pair first (Phase I: T-I3 ported this off the legacy send_file,
+    // which was cancel-fast enough to race ahead of the pairing gate
+    // undetected -- upload_file's PrepareUpload step enforces pairing
+    // synchronously before the cancelable feeder loop even starts, so
+    // this is required here, unlike in the version this replaces).
+    let own_dir = own_identity_dir();
+    let ui = LocalDaemonClient::connect(config.data_dir.clone(), port)
+        .await
+        .expect("local client");
+    let mut events = ui.subscribe_local_events().await.expect("subscribe");
+    let remote = RemoteDeviceClient::connect(own_dir.path(), "127.0.0.1", port)
         .await
         .expect("remote connect");
+    remote.pair(ui_identity()).await.expect("pair rpc");
+    let event = tokio::time::timeout(Duration::from_secs(3), events.message())
+        .await
+        .expect("event within 3s")
+        .expect("stream healthy")
+        .expect("stream open");
+    let Some(connectibled::proto::connectible::v1::local_event::Event::PairingRequested(prompt)) =
+        event.event
+    else {
+        panic!("expected PairingRequested local event");
+    };
+    assert!(remote
+        .confirm_pin("desktop-ui-test", &prompt.pin_code)
+        .await
+        .expect("confirm_pin rpc"));
 
     let (progress_tx, mut progress_rx) = tokio::sync::mpsc::channel(256);
     let cancel = Arc::new(Notify::new());
-    // Pre-arm the cancel: send_file's select! sees a stored permit and
-    // takes the cancel branch on its first poll -- deterministic, no race
-    // against the (fast, loopback) transfer.
+    // Pre-arm the cancel: upload_file's feeder loop checks a flag set by
+    // consuming this notify permit before its first read, so this is
+    // deterministic rather than racing the (fast, loopback) transfer.
     cancel.notify_one();
 
     remote
-        .send_file(
+        .upload_file(
             &source_path,
             ui_identity(),
             progress_tx,
             new_transfer_id(),
             cancel,
-            0,
         )
         .await
-        .expect("send_file returns Ok even when canceled");
+        .expect("upload_file returns Ok even when canceled");
 
     let mut saw_canceled = false;
     while let Some(progress) = progress_rx.recv().await {
@@ -309,4 +288,132 @@ async fn cancel_aborts_transfer_and_finalizes_nothing() {
         std::fs::metadata(&received_path).is_err(),
         "a canceled transfer must not finalize a file on disk"
     );
+}
+
+/// Phase G, T-G8: the mTLS identity gate end to end. A device that
+/// paired as "desktop-ui-test" has its client-cert fingerprint pinned
+/// (T-G4). A second, completely different identity -- its own distinct
+/// self-signed cert, never involved in that pairing -- then tries to
+/// call `prepare_upload` *claiming* to be "desktop-ui-test" in the
+/// request body (the `sender` field is caller-supplied and independent
+/// of the TLS connection's actual certificate). Before Phase G this
+/// would have been accepted on `is_paired` alone; T-G5's fingerprint
+/// check must reject it.
+#[tokio::test]
+async fn upload_file_rejects_a_sender_claiming_another_devices_pinned_identity() {
+    let (_tmp, config, port) = spawn_test_daemon().await;
+
+    // The real "desktop-ui-test" pairs normally, pinning its own
+    // identity dir's cert fingerprint against that device_id.
+    let victim_dir = own_identity_dir();
+    let ui = LocalDaemonClient::connect(config.data_dir.clone(), port)
+        .await
+        .expect("local client");
+    let mut events = ui.subscribe_local_events().await.expect("subscribe");
+    let victim = RemoteDeviceClient::connect(victim_dir.path(), "127.0.0.1", port)
+        .await
+        .expect("victim connect");
+    victim.pair(ui_identity()).await.expect("pair rpc");
+    let event = tokio::time::timeout(Duration::from_secs(3), events.message())
+        .await
+        .expect("event within 3s")
+        .expect("stream healthy")
+        .expect("stream open");
+    let Some(connectibled::proto::connectible::v1::local_event::Event::PairingRequested(prompt)) =
+        event.event
+    else {
+        panic!("expected PairingRequested local event");
+    };
+    assert!(victim
+        .confirm_pin("desktop-ui-test", &prompt.pin_code)
+        .await
+        .expect("confirm_pin rpc"));
+
+    // A distinct identity -- different cert/key, never paired as
+    // anything -- connects fresh and claims the *victim's* device_id.
+    let attacker_dir = own_identity_dir();
+    let attacker = RemoteDeviceClient::connect(attacker_dir.path(), "127.0.0.1", port)
+        .await
+        .expect("attacker connect");
+
+    let source_dir = tempfile::tempdir().expect("source dir");
+    let source_path = source_dir.path().join("spoof.bin");
+    std::fs::write(&source_path, b"this should never land").expect("write source file");
+
+    let (progress_tx, _progress_rx) = tokio::sync::mpsc::channel(4);
+    let result = attacker
+        .upload_file(
+            &source_path,
+            ui_identity(), // claims device_id "desktop-ui-test", not attacker's own
+            progress_tx,
+            new_transfer_id(),
+            Arc::new(Notify::new()),
+        )
+        .await;
+
+    match result {
+        Err(connectible_desktop_core::DesktopError::Rpc(status)) => {
+            assert_eq!(
+                status.code(),
+                tonic::Code::PermissionDenied,
+                "expected the fingerprint-mismatch rejection, got: {status}"
+            );
+        }
+        other => panic!("expected a PermissionDenied rpc error, got: {other:?}"),
+    }
+
+    let received_path = config.data_dir.join("received").join("spoof.bin");
+    assert!(
+        std::fs::metadata(&received_path).is_err(),
+        "a spoofed sender must never get a file onto disk"
+    );
+}
+
+/// Phase J / T-J6: the persisted-transfer-history round trip through
+/// `LocalDaemonClient` -- exactly what the desktop app does after
+/// driving an outgoing send itself (`record_transfer_history` on
+/// completion, then `list_transfer_history` to render the history
+/// panel). Daemon-side semantics (loopback gating, incoming rows,
+/// ordering) are covered in `daemon/tests/upload_transfer.rs`; this
+/// proves the desktop client half.
+#[tokio::test]
+async fn transfer_history_round_trips_through_the_local_daemon_client() {
+    let (_tmp, config, port) = spawn_test_daemon().await;
+
+    let ui = LocalDaemonClient::connect(config.data_dir.clone(), port)
+        .await
+        .expect("local client");
+
+    let transfer_id = new_transfer_id();
+    ui.record_transfer_history(
+        &transfer_id,
+        "peer-mobile",
+        "holiday.jpg",
+        1_234_567,
+        "outgoing",
+        "completed",
+        1_000,
+        2_000,
+    )
+    .await
+    .expect("record_transfer_history rpc");
+
+    let entries = ui
+        .list_transfer_history(10)
+        .await
+        .expect("list_transfer_history rpc");
+    assert_eq!(
+        entries.len(),
+        1,
+        "fresh daemon holds exactly the entry just recorded"
+    );
+    let entry = &entries[0];
+    assert_eq!(entry.transfer_id, transfer_id);
+    assert_eq!(entry.peer_device_id, "peer-mobile");
+    assert_eq!(entry.file_name, "holiday.jpg");
+    assert_eq!(entry.total_bytes, 1_234_567);
+    assert_eq!(entry.direction, "outgoing");
+    assert_eq!(entry.status, "completed");
+    assert_eq!(entry.started_at_ms, 1_000);
+    assert_eq!(entry.finished_at_ms, 2_000);
 }

@@ -24,6 +24,22 @@ class RequesterPairing {
   final GrpcService grpc;
 }
 
+/// Categorizes [PairingModel.lastError] so the UI can pick a dedicated,
+/// localized message for security-relevant failures instead of surfacing
+/// the raw (English) transport/peer string. Only the model layer -- which
+/// has no `BuildContext`/i18n -- assigns these; the widget layer maps them
+/// to translated strings (T-X19).
+enum PairingErrorKind {
+  /// A connect/pairing failure whose stored [PairingModel.lastError] text
+  /// is the best thing to show as-is.
+  generic,
+
+  /// A paired peer's TLS certificate changed since pairing, so a reconnect
+  /// was refused (MITM-or-reinstall). The UI shows its own dedicated,
+  /// actionable "forget and re-pair" string rather than the raw message.
+  fingerprintChanged,
+}
+
 /// Owns the pairing flow -- both requester side (dialing a discovered
 /// peer, submitting the PIN it shows) and responder side (the inbound
 /// `ConnectibleServer`/`PairingManager` a remote peer dials into this
@@ -42,22 +58,25 @@ class PairingModel extends ChangeNotifier
   PairingModel({
     required DeviceListModel deviceList,
     required void Function(pb.ClipboardData) onClipboardFrame,
-    required void Function(pb.FileTransferStart) onFileTransferStart,
-    required void Function(pb.FileChunk) onFileChunk,
-    required void Function(pb.FileChunkRequest) onFileChunkRequest,
     Future<pb.PrepareUploadResponse> Function(pb.PrepareUploadRequest)?
         onPrepareUpload,
     Future<pb.UploadFileResult> Function(Stream<pb.UploadFilePart>)?
         onUploadFile,
     bool pairableEnabled = true,
+    // Injectable so unit tests can supply a pre-generated identity
+    // (`ServerIdentity.generate()`, no disk I/O) instead of the real
+    // `ServerIdentity.loadOrCreate()`, which needs `path_provider` --
+    // unavailable in this unit test host (see `pairing_model_test.dart`).
+    // Every outbound connect (`startPair`/`reconnectToPeer`, Phase G,
+    // T-G6) goes through this, not just the inbound server, so it must
+    // be overridable independently of `pairableEnabled`.
+    Future<ServerIdentity> Function()? ownIdentityLoader,
   })  : _deviceList = deviceList,
         _onClipboardFrame = onClipboardFrame,
-        _onFileTransferStart = onFileTransferStart,
-        _onFileChunk = onFileChunk,
-        _onFileChunkRequest = onFileChunkRequest,
         _onPrepareUpload = onPrepareUpload,
         _onUploadFile = onUploadFile,
-        _pairableEnabled = pairableEnabled {
+        _pairableEnabled = pairableEnabled,
+        _ownIdentityLoader = ownIdentityLoader ?? ServerIdentity.loadOrCreate {
     if (_pairableEnabled) {
       unawaited(_startServer());
     }
@@ -65,9 +84,6 @@ class PairingModel extends ChangeNotifier
 
   final DeviceListModel _deviceList;
   final void Function(pb.ClipboardData) _onClipboardFrame;
-  final void Function(pb.FileTransferStart) _onFileTransferStart;
-  final void Function(pb.FileChunk) _onFileChunk;
-  final void Function(pb.FileChunkRequest) _onFileChunkRequest;
   final Future<pb.PrepareUploadResponse> Function(pb.PrepareUploadRequest)?
       _onPrepareUpload;
   final Future<pb.UploadFileResult> Function(Stream<pb.UploadFilePart>)?
@@ -99,7 +115,32 @@ class PairingModel extends ChangeNotifier
   /// first-ever connect), so the UI can say "Reconnecting" not "Connecting".
   bool reconnecting = false;
   RequesterPairing? pendingPairing;
+
+  /// Human-readable detail of the most recent connect/pairing failure, or
+  /// null if the last attempt cleared it. [lastErrorKind] categorizes it
+  /// and [lastErrorSeq] lets a listener detect a *fresh* failure.
   String? lastError;
+
+  /// What kind of failure [lastError] describes, so the UI can localize
+  /// security-relevant cases specially (see [PairingErrorKind]).
+  PairingErrorKind lastErrorKind = PairingErrorKind.generic;
+
+  /// Bumped every time a new error is recorded (via [_setError]), even when
+  /// the message text is identical to the previous one, so a UI listener
+  /// can reliably tell one failure from the next. Clearing [lastError] to
+  /// null at the start of a fresh attempt deliberately does NOT bump this
+  /// -- a clear is not something to surface.
+  int lastErrorSeq = 0;
+
+  /// Records a failure for the UI to surface. Does not call
+  /// [notifyListeners]; every call site already notifies right after (kept
+  /// that way so the existing flow is unchanged).
+  void _setError(String message,
+      {PairingErrorKind kind = PairingErrorKind.generic}) {
+    lastError = message;
+    lastErrorKind = kind;
+    lastErrorSeq++;
+  }
 
   GrpcService? _grpc;
   StreamController<pb.SyncFrame>? _outbound;
@@ -135,10 +176,22 @@ class PairingModel extends ChangeNotifier
 
   // --- inbound server (responder role) ---------------------------------
 
+  /// This device's own cert/key identity, cached after first load
+  /// (Phase G, T-G6): used both as the inbound server's TLS identity
+  /// (below) and, symmetrically, as the outbound client identity every
+  /// [GrpcService.connect] call presents (`startPair`/`reconnectToPeer`)
+  /// -- one identity per device, either role.
+  ServerIdentity? _ownIdentity;
+  final Future<ServerIdentity> Function() _ownIdentityLoader;
+
+  Future<ServerIdentity> _loadOwnIdentity() async {
+    return _ownIdentity ??= await _ownIdentityLoader();
+  }
+
   Future<void> _startServer() async {
     if (_server != null) return;
     try {
-      final identity = await ServerIdentity.loadOrCreate();
+      final identity = await _loadOwnIdentity();
       final server = ConnectibleServer(this, _pairing);
       await server.start(identity);
       _server = server;
@@ -179,7 +232,9 @@ class PairingModel extends ChangeNotifier
       pb.PrepareUploadRequest request) async {
     // Only a paired device may push files (same trust level as the rest
     // of the app, keyed on the claimed device_id; per-device cert binding
-    // is TOFU, Phase C). Reject before any bytes move.
+    // is TOFU, Phase C -- mobile's responder side has no TLS-layer
+    // client-cert verification, see the note in
+    // `ConnectibleServer.start`). Reject before any bytes move.
     final senderId = request.sender.deviceId;
     final paired =
         _deviceList.knownDevices().any((d) => d.deviceId == senderId);
@@ -202,6 +257,22 @@ class PairingModel extends ChangeNotifier
     return handler(request);
   }
 
+  // Phase G, T-G6: the device_id the *current inbound* session's peer
+  // claimed via its Identity frame (previously silently dropped --
+  // `onInboundSyncStream` never tracked it at all, so non-Identity
+  // frames were processed with no pairing check whatsoever). Gated in
+  // `_onInboundFrameFromRemotePeer` below. Fingerprint-level connection
+  // binding (matching the daemon's `handle_frame`) was attempted and
+  // reverted -- see the note in `ConnectibleServer.start`: `dart:io`'s
+  // `SecureServerSocket` cannot accept an unverified self-signed client
+  // certificate, so mobile's responder role has no TLS-layer identity
+  // to check against. Only the inbound (responder) path needs this
+  // tracking -- the outbound (requester) path's peer is already
+  // TOFU-verified at the TLS layer by the time this device chose to
+  // dial out (`GrpcService.connect`'s `_TofuState`), so `_activate`
+  // below reuses the shared, ungated `_onInboundFrame` directly.
+  String? _inboundPeerDeviceId;
+
   @override
   Stream<pb.SyncFrame> onInboundSyncStream(Stream<pb.SyncFrame> inbound) {
     // A desktop peer opened a SyncStream to this phone. Route its frames
@@ -211,10 +282,11 @@ class PairingModel extends ChangeNotifier
     final out = StreamController<pb.SyncFrame>();
     _inboundServerOut = out;
     _outbound = out;
+    _inboundPeerDeviceId = null;
     out.add(pb.SyncFrame(identity: localIdentity));
 
     inbound.listen(
-      _onInboundFrame,
+      _onInboundFrameFromRemotePeer,
       onError: (Object e) {
         debugPrint('inbound sync stream error: $e');
         _closeInboundSession();
@@ -229,9 +301,46 @@ class PairingModel extends ChangeNotifier
     return out.stream;
   }
 
+  /// Phase G, T-G6: gates every non-`Identity` frame arriving on the
+  /// *inbound* (responder) SyncStream on the claimed device_id being
+  /// paired -- closing the real, pre-existing gap where inbound frames
+  /// were processed with no pairing check at all. `Identity` itself is
+  /// exempt -- it is what lets a fresh inbound connection attribute
+  /// itself in the first place. Fail closed: a frame arriving before any
+  /// `Identity` frame, or an unpaired claimed device_id, is dropped
+  /// silently -- mobile's SyncStream has no error-frame convention
+  /// symmetric to the daemon's `send_error`, so rejection here is a
+  /// drop, not a reply.
+  ///
+  /// This does *not* verify the connection's TLS identity against the
+  /// claimed device_id the way the daemon's `handle_frame` does (T-G5) --
+  /// see the note in `ConnectibleServer.start` for why that is not
+  /// achievable on mobile's responder side with `dart:io`. A device that
+  /// somehow learned a paired peer's device_id could still claim it
+  /// here; this closes the "no check at all" gap, not the full
+  /// spoofing gap the daemon closes.
+  void _onInboundFrameFromRemotePeer(pb.SyncFrame frame) {
+    if (frame.whichPayload() == pb.SyncFrame_Payload.identity) {
+      _inboundPeerDeviceId = frame.identity.deviceId;
+      return;
+    }
+    final peerId = _inboundPeerDeviceId;
+    if (peerId == null || peerId.isEmpty) {
+      debugPrint('rejecting inbound frame: peer has not identified itself yet');
+      return;
+    }
+    final paired = _deviceList.knownDevices().any((d) => d.deviceId == peerId);
+    if (!paired) {
+      debugPrint('rejecting inbound frame from unpaired/unidentified peer: $peerId');
+      return;
+    }
+    _onInboundFrame(frame);
+  }
+
   void _closeInboundSession() {
     final out = _inboundServerOut;
     _inboundServerOut = null;
+    _inboundPeerDeviceId = null;
     if (identical(_outbound, out)) {
       _outbound = null;
     }
@@ -250,11 +359,13 @@ class PairingModel extends ChangeNotifier
   Future<bool> startPair(NearbyDevice device) async {
     lastError = null;
     try {
-      final grpc = await GrpcService.connect(device.host, device.port);
+      final identity = await _loadOwnIdentity();
+      final grpc =
+          await GrpcService.connect(device.host, device.port, identity: identity);
       final outcome = await grpc.pair(localIdentity);
       if (!outcome.accepted) {
         await grpc.shutdown();
-        lastError = 'Pairing was rejected';
+        _setError('Pairing was rejected');
         notifyListeners();
         return false;
       }
@@ -266,11 +377,11 @@ class PairingModel extends ChangeNotifier
       notifyListeners();
       return true;
     } on ConnectibleException catch (e) {
-      lastError = e.message;
+      _setError(e.message);
       notifyListeners();
       return false;
     } catch (e) {
-      lastError = '$e';
+      _setError('$e');
       notifyListeners();
       return false;
     }
@@ -286,13 +397,23 @@ class PairingModel extends ChangeNotifier
           await pairing.grpc.confirmPin(localIdentity.deviceId, pin);
       if (!verified) return false;
 
+      // T-X1: persist the peer on the requester side too, symmetric with
+      // the responder path's onPeerPaired -- the responder has already
+      // recorded us at this point. Without this, a phone-initiated pairing
+      // vanished on restart, desktop->phone pushes were rejected (the
+      // prepareUpload/inbound-frame gates read the paired store), and the
+      // TOFU pin below silently no-opped. Must run BEFORE recordFingerprint
+      // so the pin has a store row to land on (T-X2).
+      _deviceList.addPairedDeviceFromNearby(pairing.device);
+
       await _activate(pairing.grpc);
       _activePeer = pairing.device;
       pendingPairing = null;
       await refreshDevices();
       // TOFU (T-C2): pin the cert we just saw as this peer's trust anchor.
-      // Best-effort -- a no-op if the requester side didn't persist the peer
-      // to the paired store; the next reconnect backfills it either way.
+      // The paired-store row was just written above, so the pin lands
+      // immediately; a reconnect backfills it if the fingerprint was
+      // somehow unavailable here.
       final observed = pairing.grpc.observedFingerprint;
       if (observed != null) {
         _deviceList.recordFingerprint(pairing.device.deviceId, observed);
@@ -300,11 +421,11 @@ class PairingModel extends ChangeNotifier
       notifyListeners();
       return true;
     } on ConnectibleException catch (e) {
-      lastError = e.message;
+      _setError(e.message);
       notifyListeners();
       return false;
     } catch (e) {
-      lastError = '$e';
+      _setError('$e');
       notifyListeners();
       return false;
     }
@@ -348,18 +469,12 @@ class PairingModel extends ChangeNotifier
       case pb.SyncFrame_Payload.clipboard:
         _onClipboardFrame(frame.clipboard);
         break;
-      case pb.SyncFrame_Payload.fileTransferStart:
-        _onFileTransferStart(frame.fileTransferStart);
-        break;
-      case pb.SyncFrame_Payload.fileChunk:
-        _onFileChunk(frame.fileChunk);
-        break;
-      case pb.SyncFrame_Payload.fileChunkRequest:
-        _onFileChunkRequest(frame.fileChunkRequest);
-        break;
       default:
-        // Other frame kinds (battery/notification/etc.) are not shown on
-        // mobile in the MVP.
+        // File transfer now runs entirely over the dedicated
+        // PrepareUpload/UploadFile RPCs (Phase I), not SyncFrame
+        // payloads, so fileTransferStart/fileChunk/fileChunkRequest are
+        // no longer dispatched here. Other frame kinds (battery/
+        // notification/etc.) are not shown on mobile in the MVP.
         break;
     }
   }
@@ -412,10 +527,17 @@ class PairingModel extends ChangeNotifier
     _reconnectAttempt++;
     notifyListeners();
     _reconnectTimer =
-        Timer(Duration(seconds: delaySeconds), () => _reconnect(peer));
+        Timer(Duration(seconds: delaySeconds), () => reconnectToPeer(peer));
   }
 
-  Future<void> _reconnect(NearbyDevice peer) async {
+  /// Resumes a session with an already-paired device -- either
+  /// automatically after an unexpected drop ([_scheduleReconnect]'s
+  /// timer), or manually, when the user taps "Connect" on a paired
+  /// device that's showing offline but was rediscovered via mDNS
+  /// (home_screen.dart's device action sheet). No PIN needed: the TOFU-
+  /// pinned cert from the original pairing is what authenticates this
+  /// peer, not a fresh code exchange.
+  Future<void> reconnectToPeer(NearbyDevice peer) async {
     if (_intentionalDisconnect) return;
     // TOFU (T-C4): require the peer's pinned cert. `_activate` opens the
     // SyncStream, which is what actually triggers the TLS handshake and the
@@ -423,8 +545,9 @@ class PairingModel extends ChangeNotifier
     final pinned = _deviceList.pinnedFingerprint(peer.deviceId);
     GrpcService? grpc;
     try {
+      final identity = await _loadOwnIdentity();
       grpc = await GrpcService.connect(peer.host, peer.port,
-          pinnedFingerprint: pinned);
+          identity: identity, pinnedFingerprint: pinned);
       // Already paired, so no PIN dance: re-opening the SyncStream and
       // re-sending Identity is enough for the daemon to resume the peer.
       await _activate(grpc);
@@ -441,8 +564,13 @@ class PairingModel extends ChangeNotifier
       // surface it, since only a forget+re-pair can resolve it.
       if (grpc != null && grpc.fingerprintMismatch) {
         debugPrint('reconnect blocked: peer certificate changed');
-        lastError =
-            "This device's security key changed since pairing. Forget and re-pair it to reconnect.";
+        // The user-visible copy comes from an i18n key on Home
+        // (`home.fingerprintChanged`), keyed off [PairingErrorKind]; this
+        // English fallback is only for any non-UI reader of [lastError].
+        _setError(
+          "This device's security key changed since pairing. Forget and re-pair it to reconnect.",
+          kind: PairingErrorKind.fingerprintChanged,
+        );
         _activePeer = null;
         reconnecting = false;
         notifyListeners();

@@ -100,6 +100,38 @@ describe("PairingDialog", () => {
     }
   });
 
+  it("responder shows a success beat and closes once justCompleted flips true", async () => {
+    const prompt: PairingPrompt = {
+      requesterDeviceId: "d2",
+      requesterDeviceName: "Anil's Phone",
+      pinCode: "428170",
+      pinExpiresAtMs: Date.now() + 30_000,
+    };
+    const onPaired = vi.fn();
+    const { rerender } = render(
+      <PairingDialog
+        mode={{ role: "responder", prompt }}
+        onClose={vi.fn()}
+        onPaired={onPaired}
+        justCompleted={false}
+      />,
+    );
+    expect(screen.getByLabelText("Pairing PIN")).toBeInTheDocument();
+
+    rerender(
+      <PairingDialog
+        mode={{ role: "responder", prompt }}
+        onClose={vi.fn()}
+        onPaired={onPaired}
+        justCompleted
+      />,
+    );
+
+    expect(screen.getByText("Paired")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Pairing PIN")).not.toBeInTheDocument();
+    await waitFor(() => expect(onPaired).toHaveBeenCalled());
+  });
+
   it("requester submits the typed PIN and calls onPaired when verified", async () => {
     confirmPin.mockResolvedValue({ ok: true, value: true });
     const onPaired = vi.fn();

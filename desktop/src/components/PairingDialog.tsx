@@ -18,12 +18,19 @@ interface PairingDialogProps {
   mode: Mode;
   onClose: () => void;
   onPaired: () => void;
+  // Responder side only: true once the daemon confirms the requester
+  // submitted the right PIN. The dialog has no other way to learn this
+  // (the PIN exchange itself is one-way -- the responder only ever
+  // displays a code, it never receives a confirmation over the wire),
+  // so without this it would just sit on the code until the countdown
+  // expired even after a successful pairing.
+  justCompleted?: boolean;
 }
 
 /// Pairing dialog (T-036), both directions. A live "linking" header, a
 /// smoothly draining countdown, animated per-digit PIN cells, a shake on
 /// a rejected code, and a success beat before it closes.
-export function PairingDialog({ mode, onClose, onPaired }: PairingDialogProps) {
+export function PairingDialog({ mode, onClose, onPaired, justCompleted }: PairingDialogProps) {
   const t = useT();
   const expiryMs = mode.role === "responder" ? mode.prompt.pinExpiresAtMs : mode.pinExpiresAtMs;
 
@@ -36,6 +43,24 @@ export function PairingDialog({ mode, onClose, onPaired }: PairingDialogProps) {
     const timer = setInterval(() => setNowMs(Date.now()), 100);
     return () => clearInterval(timer);
   }, [paired]);
+
+  useEffect(() => {
+    if (mode.role !== "responder" || !justCompleted || paired) return;
+    setPaired(true);
+    const timer = window.setTimeout(onPaired, 700);
+    return () => window.clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [justCompleted, mode.role]);
+
+  // Escape closes the dialog, matching standard modal behavior; PairingQrDialog
+  // has the same listener.
+  useEffect(() => {
+    function handleKeyDown(e: KeyboardEvent) {
+      if (e.key === "Escape") onClose();
+    }
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
 
   const msLeft = Math.max(0, expiryMs - nowMs);
   const remaining = Math.ceil(msLeft / 1000);
@@ -104,9 +129,9 @@ function LinkHeader({
 }) {
   const live = !expired && !paired;
   return (
-    <div className="mb-5 flex flex-col items-center text-center">
+    <div className="mb-4 flex flex-col items-center text-center">
       <PairingGlyph live={live} paired={paired} expired={expired} />
-      <p className="mt-3.5 text-sm font-semibold text-ink">{title}</p>
+      <p className="mt-3 text-sm font-semibold text-ink">{title}</p>
       <p className="mt-0.5 text-xs text-ink-faint">{sub}</p>
     </div>
   );
@@ -114,6 +139,8 @@ function LinkHeader({
 
 // The two-node linking glyph. Pure SVG so the tie, pulse, and halos scale
 // and stay welded together; reuses the constellation's `cnst-*` motion.
+// Kept smaller and lower-glow than the original (T-2.2) so it reads as a
+// quiet status cue, not a competing focal point above the title/subtitle.
 function PairingGlyph({ live, paired, expired }: { live: boolean; paired: boolean; expired: boolean }) {
   const A = { x: 34, y: 30 }; // this device
   const B = { x: 126, y: 30 }; // the peer
@@ -121,7 +148,7 @@ function PairingGlyph({ live, paired, expired }: { live: boolean; paired: boolea
   return (
     <svg
       viewBox="0 0 160 60"
-      className={`h-14 w-40 transition-opacity duration-500 ${expired ? "opacity-40" : "opacity-100"}`}
+      className={`h-11 w-32 transition-opacity duration-500 ${expired ? "opacity-40" : "opacity-100"}`}
       aria-hidden="true"
     >
       {/* base tie */}
@@ -148,18 +175,18 @@ function PairingGlyph({ live, paired, expired }: { live: boolean; paired: boolea
           strokeLinecap="round"
           pathLength={100}
           strokeDasharray="10 90"
-          style={{ filter: "drop-shadow(0 0 3px rgba(255,255,255,0.7))" }}
+          style={{ filter: "drop-shadow(0 0 2px rgba(255,255,255,0.5))" }}
         />
       )}
 
       {/* this device -- always lit */}
       {live && <circle className="cnst-halo" cx={A.x} cy={A.y} r={7} fill="none" stroke="rgb(var(--paper))" strokeWidth={1.4} />}
-      <circle cx={A.x} cy={A.y} r={7} fill="rgb(var(--paper))" style={{ filter: "drop-shadow(0 0 6px rgba(255,255,255,0.5))" }} />
+      <circle cx={A.x} cy={A.y} r={7} fill="rgb(var(--paper))" style={{ filter: "drop-shadow(0 0 4px rgba(255,255,255,0.35))" }} />
 
       {/* peer -- hollow while connecting, lit + check once paired */}
       {paired ? (
         <g style={{ animation: "check-pop 0.5s cubic-bezier(0.16,1,0.3,1)" }}>
-          <circle cx={B.x} cy={B.y} r={9} fill="rgb(var(--paper))" style={{ filter: "drop-shadow(0 0 7px rgba(255,255,255,0.55))" }} />
+          <circle cx={B.x} cy={B.y} r={9} fill="rgb(var(--paper))" style={{ filter: "drop-shadow(0 0 5px rgba(255,255,255,0.4))" }} />
           <path
             d={`M${B.x - 4} ${B.y} l3 3 l5 -6`}
             fill="none"

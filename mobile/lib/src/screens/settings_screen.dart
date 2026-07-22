@@ -341,11 +341,13 @@ class _ToggleRow extends StatelessWidget {
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
-        Text(label,
-            style: TextStyle(
-                fontSize: 14,
-                fontWeight: FontWeight.w500,
-                color: value ? p.ink : p.inkMuted)),
+        Expanded(
+          child: Text(label,
+              style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w500,
+                  color: value ? p.ink : p.inkMuted)),
+        ),
         Switch(
           value: value,
           onChanged: onChanged,
@@ -416,26 +418,32 @@ class _NotificationsRow extends StatelessWidget {
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
-        Row(
-          children: [
-            Icon(
-              granted ? Icons.check_circle_outline : Icons.remove_circle_outline,
-              size: 16,
-              color: granted ? p.ink : p.inkFaint,
-            ),
-            const SizedBox(width: 8),
-            Text(
-              granted
-                  ? s.t('settings.notificationsGranted')
-                  : s.t('settings.notificationsDenied'),
-              style: TextStyle(
-                fontSize: 14,
-                fontWeight: FontWeight.w500,
-                color: granted ? p.ink : p.inkMuted,
+        Expanded(
+          child: Row(
+            children: [
+              Icon(
+                granted ? Icons.check_circle_outline : Icons.remove_circle_outline,
+                size: 16,
+                color: granted ? p.ink : p.inkFaint,
               ),
-            ),
-          ],
+              const SizedBox(width: 8),
+              Flexible(
+                child: Text(
+                  granted
+                      ? s.t('settings.notificationsGranted')
+                      : s.t('settings.notificationsDenied'),
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w500,
+                    color: granted ? p.ink : p.inkMuted,
+                  ),
+                ),
+              ),
+            ],
+          ),
         ),
+        const SizedBox(width: 8),
         _PillButton(
           label: granted
               ? s.t('settings.notificationsManage')
@@ -489,10 +497,18 @@ class _AboutRow extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
       mainAxisAlignment: MainAxisAlignment.spaceBetween,
       children: [
         Text(label, style: TextStyle(fontSize: 14, color: palette.inkMuted)),
-        Text(value, style: TextStyle(fontSize: 14, color: palette.ink)),
+        const SizedBox(width: 12),
+        Expanded(
+          child: Text(
+            value,
+            textAlign: TextAlign.right,
+            style: TextStyle(fontSize: 14, color: palette.ink),
+          ),
+        ),
       ],
     );
   }

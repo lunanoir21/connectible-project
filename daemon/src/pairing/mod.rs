@@ -19,6 +19,17 @@ const MAX_ATTEMPTS: u32 = 3;
 /// automated burst, not a genuine "let me try that again" retry.
 const PAIR_COOLDOWN: Duration = Duration::from_secs(5);
 
+/// T-security: caps the number of *distinct* requester device_ids
+/// `PairingManager` will track bookkeeping for at once. Without this, a
+/// flood of `Pair` calls each using a fresh, never-reused device_id
+/// bypasses `PAIR_COOLDOWN` (which only throttles *repeated* use of the
+/// *same* id) and grows `pending`/`last_created_ms` without bound --
+/// the same class of memory-growth risk `discovery::MAX_DISCOVERED` and
+/// `RateLimiter`'s `max_keys` already guard against elsewhere in this
+/// daemon. An already-tracked device_id is never blocked by this --
+/// only a brand-new one past the cap is.
+const MAX_TRACKED_DEVICES: usize = 256;
+
 /// Draws one uniformly-random ASCII digit '0'..'9' via rejection
 /// sampling (T-404). 256 is not a multiple of 10, so a plain `byte %
 /// 10` is slightly biased toward digits 0-5 (26/256 vs 25/256 for
@@ -44,6 +55,17 @@ struct PendingPin {
     attempts: u32,
 }
 
+/// A PIN generated ahead of any inbound `Pair` call, for embedding in a
+/// pairing QR code the local user displays (desktop's "generate a
+/// pairing QR" action). One-shot: the next `create_pending` call
+/// consumes it instead of minting a fresh PIN, so the code baked into
+/// the QR is the exact code the daemon will actually check -- no
+/// separate wire transmission of the PIN is needed.
+struct PrearmedCode {
+    code: [u8; 6],
+    expires_at_ms: i64,
+}
+
 /// Event emitted to local UI subscribers (desktop/mobile) the moment a
 /// `PairRequest` arrives, so the PIN dialog can be shown immediately
 /// (T-014).
@@ -61,6 +83,18 @@ pub struct PairingRequestedEvent {
     pub pin_expires_at_ms: i64,
 }
 
+/// Event emitted to local UI subscribers the moment a pending PIN is
+/// *successfully* confirmed, so the responder's PIN dialog (which has
+/// no other way to learn the requester got it right) can show a
+/// success beat and close instead of sitting there until the countdown
+/// expires. Same in-process-or-loopback-only rule as
+/// [`PairingRequestedEvent`] applies.
+#[derive(Debug, Clone)]
+pub struct PairingCompletedEvent {
+    pub requester_device_id: String,
+    pub requester_device_name: String,
+}
+
 /// Tracks in-flight pairing PINs (T-011, T-012). PINs are never
 /// persisted to disk -- they exist only for the 30-second window and
 /// are purged from memory on success, expiry, or lockout.
@@ -71,16 +105,21 @@ pub struct PairingManager {
     /// cooldown still applies after a pending entry is cleared
     /// (lockout/expiry/success).
     last_created_ms: Mutex<HashMap<String, i64>>,
+    prearmed: Mutex<Option<PrearmedCode>>,
     events: broadcast::Sender<PairingRequestedEvent>,
+    completed: broadcast::Sender<PairingCompletedEvent>,
 }
 
 impl Default for PairingManager {
     fn default() -> Self {
         let (events, _rx) = broadcast::channel(16);
+        let (completed, _crx) = broadcast::channel(16);
         Self {
             pending: Mutex::new(HashMap::new()),
             last_created_ms: Mutex::new(HashMap::new()),
+            prearmed: Mutex::new(None),
             events,
+            completed,
         }
     }
 }
@@ -88,6 +127,33 @@ impl Default for PairingManager {
 impl PairingManager {
     pub fn subscribe(&self) -> broadcast::Receiver<PairingRequestedEvent> {
         self.events.subscribe()
+    }
+
+    pub fn subscribe_completed(&self) -> broadcast::Receiver<PairingCompletedEvent> {
+        self.completed.subscribe()
+    }
+
+    /// Pre-generates a PIN with no requester known yet, for a
+    /// desktop-displayed pairing QR code (loopback-only action -- see
+    /// `PreArmPairingCode` in grpc/service.rs). Reuses the same
+    /// rejection-sampled digit generation and `PIN_TTL` as a normal
+    /// `Pair`-triggered PIN. Overwrites any previously-armed, still
+    /// -unused code -- only the most recently generated QR is valid.
+    pub fn pre_arm(&self) -> (String, i64) {
+        let mut rng = rand::rngs::OsRng;
+        let mut digits = [0u8; 6];
+        for digit in &mut digits {
+            digit_from_rng(&mut rng, digit);
+        }
+        let expires_at_ms = now_ms() + PIN_TTL.as_millis() as i64;
+        *self
+            .prearmed
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(PrearmedCode {
+            code: digits,
+            expires_at_ms,
+        });
+        (String::from_utf8_lossy(&digits).into_owned(), expires_at_ms)
     }
 
     /// Generates a cryptographically random 6-digit PIN for the given
@@ -132,17 +198,40 @@ impl PairingManager {
                         "pairing requests from {requester_device_id} are throttled"
                     )));
                 }
+            } else if last_created.len() >= MAX_TRACKED_DEVICES {
+                return Err(DaemonError::RateLimited(
+                    "too many distinct devices are mid-pairing right now".into(),
+                ));
             }
             last_created.insert(requester_device_id.to_string(), now);
         }
 
-        let mut rng = rand::rngs::OsRng;
-        let mut digits = [0u8; 6];
-        for digit in &mut digits {
-            digit_from_rng(&mut rng, digit);
-        }
-
-        let expires_at_ms = now + PIN_TTL.as_millis() as i64;
+        // A QR-armed code (if any, and still unexpired) takes priority
+        // over minting a fresh random PIN, and is consumed one-shot so
+        // it can't be replayed for a second, unrelated pairing. Its
+        // *original* expiry carries over -- a QR scanned near the end
+        // of its displayed countdown must not silently regain a fresh
+        // 30 seconds.
+        let (digits, expires_at_ms) = {
+            let mut prearmed = self
+                .prearmed
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner());
+            let still_valid = prearmed.as_ref().is_some_and(|c| now <= c.expires_at_ms);
+            if still_valid {
+                let armed = prearmed.take().expect("checked Some above");
+                (armed.code, armed.expires_at_ms)
+            } else {
+                *prearmed = None; // drop a stale expired code, if any
+                drop(prearmed);
+                let mut rng = rand::rngs::OsRng;
+                let mut d = [0u8; 6];
+                for digit in &mut d {
+                    digit_from_rng(&mut rng, digit);
+                }
+                (d, now + PIN_TTL.as_millis() as i64)
+            }
+        };
 
         let mut pending = self
             .pending
@@ -202,7 +291,8 @@ impl PairingManager {
             && bool::from(submitted_bytes.ct_eq(&entry.code));
 
         if matches {
-            pending.remove(device_id);
+            let removed = pending.remove(device_id);
+            drop(pending);
             // A successful pairing means the PAIR_COOLDOWN concern (a
             // peer spamming Pair without ever completing) is moot for
             // this device_id -- clear it so a legitimate later re-pair
@@ -212,6 +302,12 @@ impl PairingManager {
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .remove(device_id);
+            if let Some(removed) = removed {
+                let _ = self.completed.send(PairingCompletedEvent {
+                    requester_device_id: device_id.to_string(),
+                    requester_device_name: removed.requester_device_name,
+                });
+            }
             return Ok(());
         }
 
@@ -315,6 +411,32 @@ mod tests {
         assert!(manager.confirm("unknown-device", "123456").is_err());
     }
 
+    #[tokio::test]
+    async fn successful_confirm_fires_a_completed_event_the_responder_ui_can_react_to() {
+        // The bug this covers: the responder's PIN dialog had no way to
+        // learn the requester got the code right, so it just sat there
+        // showing the code until the countdown expired.
+        let manager = PairingManager::default();
+        let mut completed = manager.subscribe_completed();
+        manager.create_pending("dev-j", "Anil's Phone").unwrap();
+        let pin = manager.peek_pin("dev-j").unwrap();
+
+        assert!(manager.confirm("dev-j", &pin).is_ok());
+
+        let event = completed.recv().await.expect("completed event");
+        assert_eq!(event.requester_device_id, "dev-j");
+        assert_eq!(event.requester_device_name, "Anil's Phone");
+    }
+
+    #[test]
+    fn a_rejected_pin_does_not_fire_a_completed_event() {
+        let manager = PairingManager::default();
+        let mut completed = manager.subscribe_completed();
+        manager.create_pending("dev-k", "Some Device").unwrap();
+        assert!(manager.confirm("dev-k", "000000").is_err());
+        assert!(completed.try_recv().is_err());
+    }
+
     #[test]
     fn repeated_pair_while_pending_is_idempotent_not_a_fresh_pin() {
         // T-403: calling create_pending again while a PIN is already
@@ -345,6 +467,46 @@ mod tests {
             manager.create_pending("dev-f", "Some Device").unwrap_err(),
             DaemonError::RateLimited(_)
         ));
+    }
+
+    #[test]
+    fn prearmed_pin_is_used_by_the_next_create_pending_call() {
+        let manager = PairingManager::default();
+        let (armed_pin, armed_expiry) = manager.pre_arm();
+        let expiry = manager.create_pending("dev-g", "Scanner Phone").unwrap();
+        assert_eq!(expiry, armed_expiry);
+        let pin = manager.peek_pin("dev-g").unwrap();
+        assert_eq!(pin, armed_pin);
+    }
+
+    #[test]
+    fn prearmed_pin_is_one_shot() {
+        let manager = PairingManager::default();
+        manager.pre_arm();
+        manager.create_pending("dev-h", "First Scanner").unwrap();
+        let first_pin = manager.peek_pin("dev-h").unwrap();
+        // Consumed -- a second, unrelated requester must not reuse it.
+        manager.create_pending("dev-i", "Second Requester").unwrap();
+        let second_pin = manager.peek_pin("dev-i").unwrap();
+        assert_ne!(first_pin, second_pin);
+    }
+
+    #[test]
+    fn distinct_device_flood_is_capped_but_known_devices_still_work() {
+        let manager = PairingManager::default();
+        for i in 0..MAX_TRACKED_DEVICES {
+            manager
+                .create_pending(&format!("flood-{i}"), "Flooder")
+                .expect("under the cap");
+        }
+        // One more distinct, never-seen-before id is rejected...
+        assert!(matches!(
+            manager.create_pending("flood-overflow", "Flooder").unwrap_err(),
+            DaemonError::RateLimited(_)
+        ));
+        // ...but a device already tracked (e.g. the very first one, its
+        // pending PIN still live) is unaffected by the cap.
+        assert!(manager.create_pending("flood-0", "Flooder").is_ok());
     }
 
     #[tokio::test]

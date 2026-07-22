@@ -58,9 +58,6 @@ void main() {
     final pairing = PairingModel(
       deviceList: deviceList,
       onClipboardFrame: (_) {},
-      onFileTransferStart: (_) {},
-      onFileChunk: (_) {},
-      onFileChunkRequest: (_) {},
       pairableEnabled: false,
     );
     final settings = SettingsModel(prefs);

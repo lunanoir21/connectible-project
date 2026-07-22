@@ -1,8 +1,8 @@
 # Connectible - Architecture Diagrams
 
 ASCII diagrams for component topology, message flow, and the pairing
-sequence. See [PLAN.md](PLAN.md) for narrative context and
-[proto/connectible.proto](proto/connectible.proto) for the messages
+sequence. See [PLAN.md](archive/PLAN.md) for narrative context and
+[proto/connectible.proto](../proto/connectible.proto) for the messages
 referenced below.
 
 ---

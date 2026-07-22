@@ -1,5 +1,4 @@
 import 'dart:io';
-import 'dart:math' as math;
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -14,7 +13,8 @@ import '../state/settings_model.dart';
 import '../theme/app_theme.dart';
 import '../widgets/device_action_sheet.dart';
 import '../widgets/pairing_sheet.dart';
-import '../widgets/ui.dart' show platformIcon;
+import '../widgets/ui.dart' show AppCard, EmptyState, Eyebrow, platformIcon;
+import 'pair_landing_screen.dart';
 
 /// Bottom-nav tab indices in [AppShell], duplicated here (rather than
 /// imported, which would create a shell <-> home_screen import cycle
@@ -42,11 +42,67 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> {
+  /// Re-entrancy guard for [_onTapNearby] (mirrors pair_scan_screen.dart's
+  /// `_handled`): a rapid double-tap on the same nearby device would
+  /// otherwise fire two concurrent `startPair` calls, leaving the first
+  /// gRPC connection dangling with nothing to clean it up. Set before the
+  /// async pairing call starts; reset on failure so a genuine retry after
+  /// an error is not permanently locked out, but left set on success (the
+  /// PairingSheet takes over from there, same as pair_scan_screen.dart).
+  bool _pairing = false;
+
+  /// The [PairingModel] we listen to for connect/pairing failures, so they
+  /// surface as a snackbar on Home (T-X19) instead of failing silently.
+  /// Held so the listener can be removed in [dispose].
+  PairingModel? _pairingModel;
+
+  /// The last error sequence we have already shown, so a fresh failure
+  /// (even one whose text repeats a previous one) is surfaced exactly once.
+  /// Seeded from the model when we attach, so an error that predates this
+  /// screen mounting is not replayed.
+  int _seenErrorSeq = 0;
+
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addPostFrameCallback(
-        (_) => context.read<DeviceListModel>().startDiscovery());
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      context.read<DeviceListModel>().startDiscovery();
+      final pairing = context.read<PairingModel>();
+      _pairingModel = pairing;
+      _seenErrorSeq = pairing.lastErrorSeq;
+      pairing.addListener(_onPairingError);
+    });
+  }
+
+  @override
+  void dispose() {
+    _pairingModel?.removeListener(_onPairingError);
+    super.dispose();
+  }
+
+  /// Surfaces a connect/pairing failure as a snackbar when [PairingModel]
+  /// records a new one. Tapping a nearby device, "connect by address", and
+  /// the automatic-reconnect fingerprint-changed security warning all reach
+  /// the user this way (previously they failed with zero feedback). The
+  /// fingerprint case gets its own dedicated, translated string; everything
+  /// else surfaces the model's message. Only speaks up while Home is the
+  /// visible route -- a pairing/scan screen pushed on top surfaces its own
+  /// errors, so this avoids doubling them.
+  void _onPairingError() {
+    final pairing = _pairingModel;
+    if (pairing == null || !mounted) return;
+    if (pairing.lastErrorSeq == _seenErrorSeq) return;
+    _seenErrorSeq = pairing.lastErrorSeq;
+    final message = pairing.lastError;
+    if (message == null) return;
+    if (!(ModalRoute.of(context)?.isCurrent ?? true)) return;
+    final s = context.strings;
+    final text = pairing.lastErrorKind == PairingErrorKind.fingerprintChanged
+        ? s.t('home.fingerprintChanged')
+        : message;
+    ScaffoldMessenger.maybeOf(context)
+        ?.showSnackBar(SnackBar(content: Text(text)));
   }
 
   /// Manual pairing (no mDNS): the user types the peer's address, we
@@ -64,6 +120,11 @@ class _HomeScreenState extends State<HomeScreen> {
     await context.read<PairingModel>().setPairableEnabled(enabled);
   }
 
+  void _openPairLanding(BuildContext context) {
+    Navigator.of(context).push(
+        MaterialPageRoute<void>(builder: (_) => const PairLandingScreen()));
+  }
+
   Future<void> _openManualConnect(BuildContext context) async {
     final result = await ManualConnectSheet.show(context);
     if (!mounted || result == null) return;
@@ -77,6 +138,8 @@ class _HomeScreenState extends State<HomeScreen> {
   }
 
   Future<void> _onTapNearby(NearbyDevice device) async {
+    if (_pairing) return;
+    _pairing = true;
     final model = context.read<PairingModel>();
     final ok = await model.startPair(device);
     if (!mounted) return;
@@ -85,6 +148,14 @@ class _HomeScreenState extends State<HomeScreen> {
       await PairingSheet.show(context,
           deviceName: device.deviceName,
           pinExpiresAtMs: pending.pinExpiresAtMs);
+      if (!mounted) return;
+      // Unlike pair_scan_screen.dart (which navigates away right after a
+      // successful pair, so its `_handled` never needs to be reset),
+      // HomeScreen stays on screen -- reset once the sheet closes so a
+      // later tap on another device isn't permanently locked out.
+      _pairing = false;
+    } else {
+      _pairing = false;
     }
   }
 
@@ -126,6 +197,24 @@ class _HomeScreenState extends State<HomeScreen> {
           danger: true,
           onTap: () => pairing.disconnect(),
         ));
+      } else {
+        // Paired but not currently connected -- if mDNS has rediscovered
+        // this same device on the LAN, offer a direct reconnect instead
+        // of forcing Forget + a fresh PIN exchange. No match means it's
+        // not currently reachable (off/asleep/different network) and
+        // there's nothing to connect to yet.
+        final rediscovered = context
+            .read<DeviceListModel>()
+            .nearby
+            .where((n) => n.deviceId == paired.deviceId)
+            .firstOrNull;
+        if (rediscovered != null) {
+          actions.add(DeviceAction(
+            icon: Icons.link,
+            label: s.t('menu.connect'),
+            onTap: () => pairing.reconnectToPeer(rediscovered),
+          ));
+        }
       }
       actions.add(DeviceAction(
         icon: Icons.person_remove_outlined,
@@ -256,7 +345,7 @@ class _HomeScreenState extends State<HomeScreen> {
             onRefresh: () => _refreshAll(context),
           ),
           const SizedBox(height: 8),
-          ConstellationView(
+          _HomeDeviceList(
             deviceName: model.deviceName,
             paired: paired,
             pairable: pairable,
@@ -292,11 +381,25 @@ class _HomeScreenState extends State<HomeScreen> {
           ),
           const SizedBox(height: 10),
           Center(
-            child: TextButton.icon(
-              onPressed: () => _openManualConnect(context),
-              icon: Icon(Icons.link, size: 16, color: p.inkMuted),
-              label: Text(s.t('home.connectByAddress'),
-                  style: TextStyle(fontSize: 13, color: p.inkMuted)),
+            child: Wrap(
+              alignment: WrapAlignment.center,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                TextButton.icon(
+                  onPressed: () => _openPairLanding(context),
+                  icon: Icon(Icons.qr_code_scanner,
+                      size: 16, color: p.inkMuted),
+                  label: Text(s.t('pairing.landing.cta'),
+                      style: TextStyle(fontSize: 13, color: p.inkMuted)),
+                ),
+                Container(width: 1, height: 14, color: p.line),
+                TextButton.icon(
+                  onPressed: () => _openManualConnect(context),
+                  icon: Icon(Icons.link, size: 16, color: p.inkMuted),
+                  label: Text(s.t('home.connectByAddress'),
+                      style: TextStyle(fontSize: 13, color: p.inkMuted)),
+                ),
+              ],
             ),
           ),
         ],
@@ -498,43 +601,16 @@ class _StatusLine extends StatelessWidget {
   }
 }
 
-// ===== Constellation =====
-// The home's signature. This phone sits at the center; every peer is a
-// star held on an orbit by a tie back to you. State is legible in the
-// structure: paired peers ride the inner orbit, nearby-but-unpaired ones
-// the looser outer orbit; the tie carries the live reading -- a solid
-// welded line and a lit star for an online peer, a thin line and a
-// hollow star when offline, a dashed detached tie for a device merely in
-// range. Motion is one orchestrated page-load (center -> ties draw out
-// -> stars land), then two quiet ambient loops: a heartbeat traveling
-// each live tie, and a halo breathing on live stars. Both loops stop
-// when the platform asks for reduced motion.
+// ===== Device list =====
+// This device's own row, then a "Paired" section, then a "Nearby"
+// section for unpaired mDNS advertisers -- the same grouped-card,
+// hairline-row language desktop's HomePanel uses (T-desktop-home,
+// §2.4), replacing the former constellation/orbit view. Paired rows
+// open the same action sheet a tapped star used to; nearby rows pair
+// directly, same as before.
 
-enum _StarKind { online, offline, nearby }
-
-class _Star {
-  const _Star({
-    required this.id,
-    required this.name,
-    required this.kind,
-    required this.pos,
-    required this.index,
-    this.device,
-    this.nearby,
-  });
-
-  final String id;
-  final String name;
-  final _StarKind kind;
-  final Offset pos;
-  final int index;
-  final DeviceInfo? device;
-  final NearbyDevice? nearby;
-}
-
-class ConstellationView extends StatefulWidget {
-  const ConstellationView({
-    super.key,
+class _HomeDeviceList extends StatelessWidget {
+  const _HomeDeviceList({
     required this.deviceName,
     required this.paired,
     required this.pairable,
@@ -542,7 +618,6 @@ class ConstellationView extends StatefulWidget {
     required this.strings,
     required this.onTapPaired,
     required this.onTapNearby,
-    this.height = 328,
   });
 
   final String deviceName;
@@ -552,507 +627,298 @@ class ConstellationView extends StatefulWidget {
   final AppStrings strings;
   final ValueChanged<DeviceInfo> onTapPaired;
   final ValueChanged<NearbyDevice> onTapNearby;
-  final double height;
-
-  @override
-  State<ConstellationView> createState() => _ConstellationViewState();
-}
-
-class _ConstellationViewState extends State<ConstellationView>
-    with TickerProviderStateMixin {
-  late final AnimationController _entrance = AnimationController(
-      vsync: this, duration: const Duration(milliseconds: 1150));
-  late final AnimationController _ambient = AnimationController(
-      vsync: this, duration: const Duration(seconds: 3));
-  bool _started = false;
-
-  @override
-  void didChangeDependencies() {
-    super.didChangeDependencies();
-    final reduce = MediaQuery.maybeOf(context)?.disableAnimations ?? false;
-    if (reduce) {
-      // Skip straight to the settled frame and never loop, so a reduced-
-      // motion user (and widget tests calling pumpAndSettle) sees a
-      // static constellation instead of perpetual animation.
-      _entrance.value = 1;
-    } else if (!_started) {
-      _started = true;
-      _entrance.forward();
-      _ambient.repeat();
-    }
-  }
-
-  @override
-  void dispose() {
-    _entrance.dispose();
-    _ambient.dispose();
-    super.dispose();
-  }
-
-  List<_Star> _layout(Size size) {
-    final center = Offset(size.width / 2, size.height / 2);
-    final rMax = math.min(size.width / 2, size.height / 2) - 34;
-    final innerRing = rMax * 0.74;
-    final outerRing = rMax;
-    final hasPaired = widget.paired.isNotEmpty;
-
-    List<_Star> place<T>(
-      List<T> items,
-      double ring,
-      double startDeg,
-      int indexOffset,
-      _Star Function(T item, Offset pos, int index) make,
-    ) {
-      final n = items.length;
-      return List<_Star>.generate(n, (i) {
-        final step = n > 0 ? 360.0 / n : 0.0;
-        final base = n == 1 ? -90.0 : startDeg + i * step;
-        final seed = _hashSeed((items[i] as dynamic).deviceId as String);
-        final spread = n > 4 ? 8.0 : 15.0;
-        final jitterA = ((seed % 1000) / 1000 - 0.5) * spread;
-        final jitterR = (((seed >> 10) % 1000) / 1000 - 0.5) * 16;
-        final ang = (base + jitterA) * math.pi / 180;
-        final rr = ring + jitterR;
-        final pos = center + Offset(rr * math.cos(ang), rr * math.sin(ang));
-        return make(items[i], pos, indexOffset + i);
-      });
-    }
-
-    final paired = place<DeviceInfo>(
-      widget.paired,
-      innerRing,
-      -90,
-      0,
-      (d, pos, index) => _Star(
-        id: d.deviceId,
-        name: d.deviceName,
-        kind: d.online ? _StarKind.online : _StarKind.offline,
-        pos: pos,
-        index: index,
-        device: d,
-      ),
-    );
-    final near = place<NearbyDevice>(
-      widget.pairable,
-      hasPaired ? outerRing : innerRing,
-      -70,
-      widget.paired.length,
-      (d, pos, index) => _Star(
-        id: d.deviceId,
-        name: d.deviceName,
-        kind: _StarKind.nearby,
-        pos: pos,
-        index: index,
-        nearby: d,
-      ),
-    );
-    return [...paired, ...near];
-  }
-
-  void _handleTap(Offset local, List<_Star> stars) {
-    _Star? hit;
-    double best = 30; // generous touch radius
-    for (final star in stars) {
-      final d = (star.pos - local).distance;
-      if (d < best) {
-        best = d;
-        hit = star;
-      }
-    }
-    if (hit == null) return;
-    if (hit.kind == _StarKind.nearby && hit.nearby != null) {
-      widget.onTapNearby(hit.nearby!);
-    } else if (hit.device != null) {
-      widget.onTapPaired(hit.device!);
-    }
-  }
-
-  /// A small monochrome platform icon centered on each paired node, faded
-  /// in with the entrance sequence. Only paired stars (which carry a real
-  /// peer Identity, hence a platform) get one; unknown platforms fall back
-  /// to the generic device glyph via [platformIcon].
-  List<Widget> _platformBadges(List<_Star> stars) {
-    const nodeR = 7.0; // matches _ConstellationPainter._nodeR
-    final p = widget.palette;
-    final badges = <Widget>[];
-    for (final star in stars) {
-      final device = star.device;
-      if (device == null || star.kind == _StarKind.nearby) continue;
-      final online = star.kind == _StarKind.online;
-      badges.add(Positioned(
-        left: star.pos.dx - nodeR,
-        top: star.pos.dy - nodeR,
-        width: nodeR * 2,
-        height: nodeR * 2,
-        child: AnimatedBuilder(
-          animation: _entrance,
-          builder: (context, child) => Opacity(
-            opacity: ((_entrance.value - 0.6) / 0.4).clamp(0.0, 1.0),
-            child: child,
-          ),
-          child: Center(
-            child: Icon(
-              platformIcon(device.platform),
-              size: 9,
-              // Dark glyph over the light filled online node; a muted light
-              // glyph over the dark offline node -- monochrome either way.
-              color: online ? p.canvas : p.inkMuted,
-            ),
-          ),
-        ),
-      ));
-    }
-    return badges;
-  }
 
   @override
   Widget build(BuildContext context) {
-    final s = widget.strings;
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        final size = Size(constraints.maxWidth, widget.height);
-        final stars = _layout(size);
-        final empty = stars.isEmpty;
-        return GestureDetector(
-          behavior: HitTestBehavior.opaque,
-          onTapUp: (d) => _handleTap(d.localPosition, stars),
-          child: SizedBox(
-            width: size.width,
-            height: size.height,
-            child: Stack(
-              children: [
-                Positioned.fill(
-                  child: AnimatedBuilder(
-                    animation: Listenable.merge([_entrance, _ambient]),
-                    builder: (context, _) => CustomPaint(
-                      painter: _ConstellationPainter(
-                        stars: stars,
-                        deviceName: widget.deviceName,
-                        palette: widget.palette,
-                        entrance: Curves.easeOutCubic.transform(_entrance.value),
-                        ambient: _ambient.value,
-                      ),
-                    ),
-                  ),
+    final p = palette;
+    final s = strings;
+    final name = deviceName.isEmpty ? s.t('status.thisDevice') : deviceName;
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        AppCard(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
+          child: Row(
+            children: [
+              _DeviceAvatar(name: name, online: true, palette: p),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(name,
+                        style: TextStyle(
+                            fontSize: 14,
+                            fontWeight: FontWeight.w600,
+                            color: p.ink)),
+                    Text(s.t('status.thisDevice'),
+                        style: TextStyle(fontSize: 12, color: p.inkFaint)),
+                  ],
                 ),
-                // Platform icons over the paired nodes (T-E6). Rendered as
-                // real widgets rather than painted glyphs so the icon is
-                // findable/accessible; nearby (unpaired) nodes stay bare
-                // dashed rings, which keeps "known" vs "discovered" legible.
-                ..._platformBadges(stars),
-                if (empty)
-                  Positioned(
-                    left: 0,
-                    right: 0,
-                    bottom: 34,
-                    child: Column(
+              ),
+            ],
+          ),
+        ),
+        if (paired.isNotEmpty) ...[
+          const SizedBox(height: 18),
+          Eyebrow(s.t('home.paired')),
+          const SizedBox(height: 8),
+          _ListCard(
+            palette: p,
+            children: [
+              for (final d in paired)
+                _PairedRow(device: d, palette: p, strings: s, onTap: onTapPaired),
+            ],
+          ),
+        ],
+        if (pairable.isNotEmpty) ...[
+          const SizedBox(height: 18),
+          Eyebrow(s.t('devices.nearby')),
+          const SizedBox(height: 8),
+          _ListCard(
+            palette: p,
+            children: [
+              for (final d in pairable)
+                _NearbyRow(device: d, palette: p, strings: s, onTap: onTapNearby),
+            ],
+          ),
+        ],
+        if (paired.isEmpty && pairable.isEmpty) ...[
+          const SizedBox(height: 12),
+          EmptyState(
+            icon: Icons.devices_other_outlined,
+            title: s.t('devices.emptyTitle'),
+            hint: s.t('devices.emptyHint'),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+/// Rounded card that clips its children so per-row [InkWell] ripples
+/// stay within the card's own corner radius, with a hairline divider
+/// between rows -- the mobile equivalent of desktop's `card`/`card-hover`
+/// utility classes.
+class _ListCard extends StatelessWidget {
+  const _ListCard({required this.palette, required this.children});
+  final AppPalette palette;
+  final List<Widget> children;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = palette;
+    return ClipRRect(
+      borderRadius: BorderRadius.circular(14),
+      child: Container(
+        decoration: BoxDecoration(
+          color: p.surfaceRaised,
+          border: Border.all(color: p.line),
+          borderRadius: BorderRadius.circular(14),
+        ),
+        child: Column(
+          children: [
+            for (final (i, child) in children.indexed) ...[
+              if (i != 0) Divider(color: p.line, height: 1),
+              child,
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _DeviceAvatar extends StatelessWidget {
+  const _DeviceAvatar({required this.name, this.online, required this.palette});
+  final String name;
+  final bool? online;
+  final AppPalette palette;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = palette;
+    return Stack(
+      clipBehavior: Clip.none,
+      children: [
+        Container(
+          width: 38,
+          height: 38,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            color: p.surfaceOverlay,
+            borderRadius: BorderRadius.circular(11),
+            border: Border.all(color: p.line),
+          ),
+          child: Text(monogram(name),
+              style: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  color: p.inkMuted)),
+        ),
+        if (online != null)
+          Positioned(
+            right: -1,
+            bottom: -1,
+            child: Container(
+              width: 11,
+              height: 11,
+              decoration: BoxDecoration(
+                color: online! ? p.paper : p.inkGhost,
+                shape: BoxShape.circle,
+                border: Border.all(color: p.surfaceRaised, width: 2),
+              ),
+            ),
+          ),
+      ],
+    );
+  }
+}
+
+class _PairedRow extends StatelessWidget {
+  const _PairedRow({
+    required this.device,
+    required this.palette,
+    required this.strings,
+    required this.onTap,
+  });
+  final DeviceInfo device;
+  final AppPalette palette;
+  final AppStrings strings;
+  final ValueChanged<DeviceInfo> onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = palette;
+    final s = strings;
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: () => onTap(device),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 13),
+          child: Row(
+            children: [
+              _DeviceAvatar(name: device.deviceName, online: device.online, palette: p),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Row(
                       children: [
-                        Text(s.t('devices.emptyTitle'),
-                            style: TextStyle(
-                                fontSize: 15,
-                                fontWeight: FontWeight.w600,
-                                color: widget.palette.ink)),
-                        const SizedBox(height: 6),
-                        Padding(
-                          padding: const EdgeInsets.symmetric(horizontal: 40),
-                          child: Text(s.t('devices.emptyHint'),
-                              textAlign: TextAlign.center,
+                        Icon(platformIcon(device.platform),
+                            size: 14, color: p.inkFaint),
+                        const SizedBox(width: 6),
+                        Flexible(
+                          child: Text(device.deviceName,
+                              overflow: TextOverflow.ellipsis,
                               style: TextStyle(
-                                  fontSize: 12.5,
-                                  color: widget.palette.inkFaint)),
+                                  fontSize: 14,
+                                  fontWeight: FontWeight.w500,
+                                  color: p.ink)),
                         ),
                       ],
                     ),
-                  ),
-              ],
-            ),
+                    Text(
+                        device.online
+                            ? s.t('devices.onlineNow')
+                            : s.t('common.offline'),
+                        style: TextStyle(fontSize: 12, color: p.inkFaint)),
+                  ],
+                ),
+              ),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+                decoration: BoxDecoration(
+                  color: device.online ? p.selectedFill : p.surfaceOverlay,
+                  borderRadius: BorderRadius.circular(999),
+                  border: Border.all(
+                      color: device.online ? p.selectedBorder : p.line),
+                ),
+                child: Text(
+                  device.online ? s.t('common.online') : s.t('common.offline'),
+                  style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      color: device.online ? p.ink : p.inkFaint),
+                ),
+              ),
+            ],
           ),
-        );
-      },
-    );
-  }
-}
-
-class _ConstellationPainter extends CustomPainter {
-  _ConstellationPainter({
-    required this.stars,
-    required this.deviceName,
-    required this.palette,
-    required this.entrance,
-    required this.ambient,
-  });
-
-  final List<_Star> stars;
-  final String deviceName;
-  final AppPalette palette;
-  final double entrance; // 0..1 eased, page-load sequence
-  final double ambient; // 0..1 looping
-
-  static const double _nodeR = 7;
-  static const double _centerR = 27;
-
-  double _seg(double t, double a, double b) =>
-      ((t - a) / (b - a)).clamp(0.0, 1.0);
-
-  @override
-  void paint(Canvas canvas, Size size) {
-    final center = Offset(size.width / 2, size.height / 2);
-    final rMax = math.min(size.width / 2, size.height / 2) - 34;
-    final innerRing = rMax * 0.74;
-    final outerRing = rMax;
-    final anyOnline = stars.any((s) => s.kind == _StarKind.online);
-    final anyNearby = stars.any((s) => s.kind == _StarKind.nearby);
-    final hasPaired = stars.any((s) => s.kind != _StarKind.nearby);
-
-    _paintField(canvas, size, center, outerRing);
-
-    // Orbit guides.
-    final guide = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = 1
-      ..color = Colors.white.withValues(alpha: 0.05);
-    canvas.drawCircle(center, innerRing, guide);
-    if (hasPaired && anyNearby) {
-      _dashedCircle(canvas, center, outerRing,
-          Colors.white.withValues(alpha: 0.04), 2, 6);
-    }
-
-    // Ties.
-    for (final star in stars) {
-      final tie = _seg(entrance, 0.08 + star.index * 0.05, 0.5 + star.index * 0.05);
-      if (star.kind == _StarKind.nearby) {
-        _dashedLine(
-          canvas,
-          center,
-          Offset.lerp(center, star.pos, tie)!,
-          Colors.white.withValues(alpha: 0.12 * tie),
-          1,
-          5,
-          4,
-        );
-      } else {
-        final live = star.kind == _StarKind.online;
-        final paint = Paint()
-          ..strokeCap = StrokeCap.round
-          ..strokeWidth = live ? 1.6 : 1.0
-          ..color = Colors.white
-              .withValues(alpha: (live ? 0.28 : 0.08));
-        canvas.drawLine(center, Offset.lerp(center, star.pos, tie)!, paint);
-      }
-    }
-
-    // Heartbeat: a lit dot traveling center -> live star.
-    for (final star in stars) {
-      if (star.kind != _StarKind.online) continue;
-      if (entrance < 0.6) continue;
-      final frac = (ambient + star.index * 0.17) % 1.0;
-      final at = Offset.lerp(center, star.pos, frac)!;
-      final fade = math.sin(frac * math.pi);
-      final glow = Paint()
-        ..color = palette.paper.withValues(alpha: 0.9 * fade)
-        ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 3);
-      canvas.drawCircle(at, 3.2, glow);
-      canvas.drawCircle(
-          at, 2.0, Paint()..color = palette.paper.withValues(alpha: fade));
-    }
-
-    // Stars.
-    for (final star in stars) {
-      final pop = _seg(entrance, 0.42 + star.index * 0.05, 0.9 + star.index * 0.04);
-      final scale = Curves.easeOutBack.transform(pop);
-      if (scale <= 0) continue;
-      _paintStar(canvas, star, scale);
-      _paintLabel(canvas, star, _seg(entrance, 0.6, 1.0));
-    }
-
-    // Center: this device (drawn last, over the tie roots).
-    _paintCenter(canvas, center, anyOnline);
-  }
-
-  void _paintStar(Canvas canvas, _Star star, double scale) {
-    final c = star.pos;
-    final r = _nodeR * scale;
-    if (star.kind == _StarKind.online) {
-      // Halo breathing outward.
-      final hp = ambient;
-      canvas.drawCircle(
-        c,
-        _nodeR + _nodeR * 1.2 * hp,
-        Paint()
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 1.4
-          ..color = palette.paper.withValues(alpha: 0.5 * (1 - hp)),
-      );
-      canvas.drawCircle(
-          c,
-          r + 3,
-          Paint()
-            ..color = palette.paper.withValues(alpha: 0.5)
-            ..maskFilter = const MaskFilter.blur(BlurStyle.normal, 5));
-      canvas.drawCircle(c, r, Paint()..color = palette.paper);
-    } else if (star.kind == _StarKind.offline) {
-      canvas.drawCircle(c, r, Paint()..color = palette.canvas);
-      canvas.drawCircle(
-          c,
-          r,
-          Paint()
-            ..style = PaintingStyle.stroke
-            ..strokeWidth = 1.4
-            ..color = Colors.white.withValues(alpha: 0.24));
-    } else {
-      canvas.drawCircle(c, r, Paint()..color = palette.canvas);
-      _dashedCircle(canvas, c, r, Colors.white.withValues(alpha: 0.26), 2.5, 2.5,
-          strokeWidth: 1.4);
-    }
-  }
-
-  void _paintLabel(Canvas canvas, _Star star, double opacity) {
-    if (opacity <= 0) return;
-    final name = star.name.length > 15 ? '${star.name.substring(0, 14)}…' : star.name;
-    final tp = TextPainter(
-      text: TextSpan(
-        text: name,
-        style: TextStyle(
-          fontSize: 12.5,
-          fontWeight: FontWeight.w500,
-          color: palette.inkMuted.withValues(alpha: opacity),
         ),
       ),
-      textDirection: TextDirection.ltr,
-      textAlign: TextAlign.center,
-      maxLines: 1,
-      ellipsis: '…',
-    )..layout(maxWidth: 120);
-    tp.paint(canvas,
-        Offset(star.pos.dx - tp.width / 2, star.pos.dy + _nodeR + 8));
-  }
-
-  void _paintCenter(Canvas canvas, Offset center, bool anyOnline) {
-    if (anyOnline) {
-      final hp = ambient;
-      canvas.drawCircle(
-        center,
-        _centerR + _centerR * 0.35 * hp,
-        Paint()
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 1.4
-          ..color = palette.paper.withValues(alpha: 0.4 * (1 - hp)),
-      );
-    }
-    canvas.drawCircle(center, _centerR, Paint()..color = palette.surfaceRaised);
-    canvas.drawCircle(
-      center,
-      _centerR,
-      Paint()
-        ..shader = RadialGradient(
-          center: const Alignment(0, -0.4),
-          radius: 0.85,
-          colors: [
-            Colors.white.withValues(alpha: 0.18),
-            Colors.white.withValues(alpha: 0),
-          ],
-        ).createShader(Rect.fromCircle(center: center, radius: _centerR)),
     );
-    canvas.drawCircle(
-        center,
-        _centerR,
-        Paint()
-          ..style = PaintingStyle.stroke
-          ..strokeWidth = 1.4
-          ..color = Colors.white.withValues(alpha: 0.16));
-    final tp = TextPainter(
-      text: TextSpan(
-        text: monogram(deviceName.isEmpty ? 'Me' : deviceName),
-        style: TextStyle(
-            fontSize: 15, fontWeight: FontWeight.w600, color: palette.ink),
-      ),
-      textDirection: TextDirection.ltr,
-    )..layout();
-    tp.paint(canvas,
-        Offset(center.dx - tp.width / 2, center.dy - tp.height / 2));
   }
-
-  void _paintField(Canvas canvas, Size size, Offset center, double clearR) {
-    // Deterministic faint scatter, twinkling out of phase.
-    var seed = 0x9e3779b9;
-    double rnd() {
-      seed = (seed * 1103515245 + 12345) & 0x7fffffff;
-      return seed / 0x7fffffff;
-    }
-
-    var placed = 0;
-    var tries = 0;
-    while (placed < 22 && tries < 300) {
-      tries++;
-      final x = rnd() * size.width;
-      final y = rnd() * size.height;
-      final p = Offset(x, y);
-      if ((p - center).distance < clearR + 22) continue;
-      placed++;
-      final phase = rnd();
-      final tw = (0.1 + 0.32 * (0.5 + 0.5 * math.sin((ambient + phase) * 2 * math.pi)))
-          .clamp(0.0, 1.0);
-      canvas.drawCircle(p, 0.7 + rnd() * 1.1,
-          Paint()..color = palette.inkGhost.withValues(alpha: tw));
-    }
-  }
-
-  void _dashedLine(Canvas canvas, Offset a, Offset b, Color color,
-      double width, double dash, double gap) {
-    final paint = Paint()
-      ..color = color
-      ..strokeWidth = width
-      ..strokeCap = StrokeCap.round;
-    final total = (b - a).distance;
-    if (total <= 0) return;
-    final dir = (b - a) / total;
-    var d = 0.0;
-    while (d < total) {
-      final start = a + dir * d;
-      final end = a + dir * math.min(d + dash, total);
-      canvas.drawLine(start, end, paint);
-      d += dash + gap;
-    }
-  }
-
-  void _dashedCircle(Canvas canvas, Offset center, double radius, Color color,
-      double dash, double gap,
-      {double strokeWidth = 1}) {
-    final paint = Paint()
-      ..style = PaintingStyle.stroke
-      ..strokeWidth = strokeWidth
-      ..color = color;
-    final circumference = 2 * math.pi * radius;
-    final step = (dash + gap) / radius; // radians
-    final dashAngle = dash / radius;
-    if (circumference <= 0) return;
-    for (double a = 0; a < 2 * math.pi; a += step) {
-      canvas.drawArc(
-        Rect.fromCircle(center: center, radius: radius),
-        a,
-        dashAngle,
-        false,
-        paint,
-      );
-    }
-  }
-
-  @override
-  bool shouldRepaint(_ConstellationPainter old) =>
-      old.entrance != entrance ||
-      old.ambient != ambient ||
-      old.stars != stars ||
-      old.deviceName != deviceName ||
-      old.palette != palette;
 }
 
-int _hashSeed(String s) {
-  var h = 2166136261;
-  for (var i = 0; i < s.length; i++) {
-    h ^= s.codeUnitAt(i);
-    h = (h * 16777619) & 0xffffffff;
+class _NearbyRow extends StatelessWidget {
+  const _NearbyRow({
+    required this.device,
+    required this.palette,
+    required this.strings,
+    required this.onTap,
+  });
+  final NearbyDevice device;
+  final AppPalette palette;
+  final AppStrings strings;
+  final ValueChanged<NearbyDevice> onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final p = palette;
+    final s = strings;
+    return Material(
+      color: Colors.transparent,
+      child: InkWell(
+        onTap: () => onTap(device),
+        child: Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 13),
+          child: Row(
+            children: [
+              _DeviceAvatar(name: device.deviceName, palette: p),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Row(
+                  children: [
+                    Icon(platformIcon(device.platform),
+                        size: 14, color: p.inkFaint),
+                    const SizedBox(width: 6),
+                    Flexible(
+                      child: Text(device.deviceName,
+                          overflow: TextOverflow.ellipsis,
+                          style: TextStyle(
+                              fontSize: 14,
+                              fontWeight: FontWeight.w500,
+                              color: p.ink)),
+                    ),
+                  ],
+                ),
+              ),
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 9, vertical: 4),
+                decoration: BoxDecoration(
+                  color: p.selectedFill,
+                  borderRadius: BorderRadius.circular(999),
+                  border: Border.all(color: p.selectedBorder),
+                ),
+                child: Text(
+                  s.t('common.pair'),
+                  style: TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      color: p.ink),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
   }
-  return h;
 }
 
 // ===== Receiving (discoverable) card =====

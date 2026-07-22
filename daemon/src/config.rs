@@ -67,6 +67,7 @@ pub fn download_dir_config_path(data_dir: &Path) -> PathBuf {
 ///      and creatable;
 ///   2. the OS Downloads folder (`~/Downloads` on Linux), if creatable;
 ///   3. `data_dir/received` as a last resort.
+///
 /// Each candidate is `create_dir_all`'d and only accepted if that
 /// succeeds, so a stale or unwritable configured path silently falls
 /// through instead of hard-failing an incoming transfer.
@@ -99,4 +100,110 @@ pub fn write_download_dir(data_dir: &Path, dir: &Path) -> std::io::Result<()> {
         download_dir_config_path(data_dir),
         dir.to_string_lossy().as_bytes(),
     )
+}
+
+/// Path to the small file persisting the UI toggle states (T-X12) --
+/// remote-input (T-309) and clipboard-sync (T-310) -- across daemon
+/// restarts, in the same `data_dir` as the download-dir override.
+pub fn ui_toggles_path(data_dir: &Path) -> PathBuf {
+    data_dir.join("ui_toggles")
+}
+
+/// Persisted enable states for the two UI toggles. Both default to
+/// `true` (the pre-T-X12 behavior) whenever the file is absent or
+/// unparseable, so a fresh install -- or a corrupt file -- simply means
+/// "everything on" rather than surprising the user with things off.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UiToggles {
+    pub clipboard_sync_enabled: bool,
+    pub remote_input_enabled: bool,
+}
+
+impl Default for UiToggles {
+    fn default() -> Self {
+        Self {
+            clipboard_sync_enabled: true,
+            remote_input_enabled: true,
+        }
+    }
+}
+
+/// Reads the persisted toggle states (T-X12). One `key=bool` per line
+/// (`clipboard_sync=`, `remote_input=`), matching the plain-text
+/// simplicity of the `download_dir` override rather than pulling in a
+/// JSON dependency for two booleans. Any missing key keeps its default;
+/// a missing or unreadable file yields all-defaults.
+pub fn load_ui_toggles(data_dir: &Path) -> UiToggles {
+    let mut toggles = UiToggles::default();
+    if let Ok(raw) = std::fs::read_to_string(ui_toggles_path(data_dir)) {
+        for line in raw.lines() {
+            let Some((key, value)) = line.split_once('=') else {
+                continue;
+            };
+            let on = value.trim() == "true";
+            match key.trim() {
+                "clipboard_sync" => toggles.clipboard_sync_enabled = on,
+                "remote_input" => toggles.remote_input_enabled = on,
+                _ => {}
+            }
+        }
+    }
+    toggles
+}
+
+/// Persists both toggle states (T-X12). Both are written every time,
+/// regardless of which one changed, so the file is always internally
+/// consistent and a partial write can't leave a stale half.
+pub fn write_ui_toggles(data_dir: &Path, toggles: UiToggles) -> std::io::Result<()> {
+    std::fs::write(
+        ui_toggles_path(data_dir),
+        format!(
+            "clipboard_sync={}\nremote_input={}\n",
+            toggles.clipboard_sync_enabled, toggles.remote_input_enabled
+        ),
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ui_toggles_default_to_all_on_when_absent() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let toggles = load_ui_toggles(dir.path());
+        assert_eq!(toggles, UiToggles::default());
+        assert!(toggles.clipboard_sync_enabled);
+        assert!(toggles.remote_input_enabled);
+    }
+
+    #[test]
+    fn ui_toggles_round_trip() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let written = UiToggles {
+            clipboard_sync_enabled: false,
+            remote_input_enabled: true,
+        };
+        write_ui_toggles(dir.path(), written).expect("write");
+        assert_eq!(load_ui_toggles(dir.path()), written);
+
+        let flipped = UiToggles {
+            clipboard_sync_enabled: true,
+            remote_input_enabled: false,
+        };
+        write_ui_toggles(dir.path(), flipped).expect("overwrite");
+        assert_eq!(load_ui_toggles(dir.path()), flipped);
+    }
+
+    #[test]
+    fn ui_toggles_missing_key_keeps_its_default() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        // Only one key present, plus a junk line: the missing key must
+        // keep its default (on), not flip to off.
+        std::fs::write(ui_toggles_path(dir.path()), "remote_input=false\ngarbage\n")
+            .expect("write partial");
+        let toggles = load_ui_toggles(dir.path());
+        assert!(toggles.clipboard_sync_enabled, "absent key defaults on");
+        assert!(!toggles.remote_input_enabled);
+    }
 }

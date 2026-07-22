@@ -24,16 +24,15 @@ const Map<String, String> _en = {
   'common.close': 'Close',
   'common.online': 'Online',
   'common.offline': 'Offline',
-  'common.retry': 'Retry',
-  'common.actions': 'Actions',
   'home.connectedToOne': 'Connected to {name}',
   'home.notConnected': 'No device connected',
   'home.notPairedYet': 'No paired devices yet',
-  'home.notPairedHint': 'Open Connectible on another device nearby to pair.',
   'home.paired': 'Paired',
   'home.statPaired': 'Paired',
-  'home.tapToPair': 'Tap to pair',
   'home.connectByAddress': 'Connect by address',
+  'home.fingerprintChanged':
+      "This device's security key changed since pairing. Forget it and pair "
+          'again to reconnect.',
   'home.receivingTitle': 'Discoverable',
   'home.receivingOnHint': 'Other devices can find this phone and send it files.',
   'home.receivingOffHint': 'Turn on to let other devices pair and send files.',
@@ -68,7 +67,6 @@ const Map<String, String> _en = {
   'clipboard.emptyHint': 'Copied text syncs here between your paired devices.',
   'clipboard.send': 'Send clipboard',
   'clipboard.copy': 'Copy',
-  'clipboard.copied': 'Copied',
   'clipboard.history': 'Clipboard history',
   'transfers.title': 'Transfers',
   'transfers.emptyTitle': 'No transfers yet',
@@ -91,13 +89,15 @@ const Map<String, String> _en = {
   'transfers.aDevice': 'the paired device',
   'input.title': 'Remote control',
   'input.eyebrow': 'Remote input',
-  'input.waitingHint':
-      "Use the paired computer's mouse and keyboard from here.",
   'input.hint':
       'Drag to move the pointer, tap to click, double-tap for a double click. Two fingers scroll.',
   'input.keyboard': 'Keyboard',
   'input.leftClick': 'Left',
   'input.rightClick': 'Right',
+  'input.arrowLeft': 'Left arrow key',
+  'input.arrowUp': 'Up arrow key',
+  'input.arrowDown': 'Down arrow key',
+  'input.arrowRight': 'Right arrow key',
   'input.enter': 'Enter',
   'input.backspace': 'Backspace',
   'input.tab': 'Tab',
@@ -165,9 +165,36 @@ const Map<String, String> _en = {
   'pairing.expiresIn': 'Expires in {n}s',
   'pairing.timedOut': 'Timed out. Start again to retry.',
   'pairing.incorrectPin': 'Incorrect PIN. Try again.',
-  'pairing.verifying': 'Verifying...',
   'pairing.pairedTitle': 'Paired',
   'pairing.pairedSub': "You're connected and ready to sync.",
+  'pairing.landing.title': 'Connect your desktop',
+  'pairing.landing.subtitle':
+      'Pair with Connectible on your computer to share your clipboard, '
+          'send files, and control it from your phone.',
+  'pairing.landing.cta': 'Pair Desktop',
+  'pairing.landing.howItWorks': 'How it works',
+  'pairing.landing.step1Title': 'Open Connectible on your computer',
+  'pairing.landing.step1Body':
+      'Go to Settings and generate a pairing QR code.',
+  'pairing.landing.step2Title': 'Scan the code',
+  'pairing.landing.step2Body':
+      'Tap the button above to open the scanner and point it at the code '
+          'on your screen.',
+  'pairing.landing.step3Title': "You're connected",
+  'pairing.landing.step3Body':
+      'The desktop appears on your Home screen. Your connection is '
+          'encrypted and PIN-verified.',
+  'pairing.scan.title': 'Scan to pair',
+  'pairing.scan.hint':
+      'Point your camera at the QR code shown on your computer.',
+  'pairing.scan.simulate': 'Simulate scan',
+  'pairing.scan.noCamera': 'No camera preview here',
+  'pairing.scan.noCameraHint':
+      'This device has no camera. Use Simulate scan to test pairing.',
+  'pairing.scan.invalidCode': 'Not a Connectible pairing code',
+  'pairing.scan.permissionDenied': 'Camera access denied',
+  'pairing.scan.permissionDeniedHint':
+      'Allow camera access for Connectible in system settings, then try again.',
 };
 
 const Map<String, String> _tr = {
@@ -187,16 +214,15 @@ const Map<String, String> _tr = {
   'common.close': 'Kapat',
   'common.online': 'Çevrimiçi',
   'common.offline': 'Çevrimdışı',
-  'common.retry': 'Tekrar dene',
-  'common.actions': 'Eylemler',
   'home.connectedToOne': '{name} ile bağlı',
   'home.notConnected': 'Bağlı cihaz yok',
   'home.notPairedYet': 'Henüz eşleşmiş cihaz yok',
-  'home.notPairedHint': 'Eşleştirmek için yakındaki başka bir cihazda Connectible\'ı aç.',
   'home.paired': 'Eşleşti',
   'home.statPaired': 'Eşleşmiş',
-  'home.tapToPair': 'Eşleştirmek için dokun',
   'home.connectByAddress': 'Adresle bağlan',
+  'home.fingerprintChanged':
+      'Bu cihazın güvenlik anahtarı eşleşmeden sonra değişti. Yeniden '
+          'bağlanmak için cihazı unutup tekrar eşleştir.',
   'home.receivingTitle': 'Keşfedilebilir',
   'home.receivingOnHint': 'Diğer cihazlar bu telefonu bulup dosya gönderebilir.',
   'home.receivingOffHint': 'Diğer cihazların eşleşip dosya göndermesi için aç.',
@@ -232,7 +258,6 @@ const Map<String, String> _tr = {
       'Kopyalanan metin eşleşmiş cihazların arasında burada senkronlanır.',
   'clipboard.send': 'Panoyu gönder',
   'clipboard.copy': 'Kopyala',
-  'clipboard.copied': 'Kopyalandı',
   'clipboard.history': 'Pano geçmişi',
   'transfers.title': 'Aktarımlar',
   'transfers.emptyTitle': 'Henüz aktarım yok',
@@ -255,13 +280,15 @@ const Map<String, String> _tr = {
   'transfers.aDevice': 'eşleşmiş cihaz',
   'input.title': 'Uzaktan kontrol',
   'input.eyebrow': 'Uzaktan giriş',
-  'input.waitingHint':
-      'Eşleşmiş bilgisayarın fare ve klavyesini buradan kullan.',
   'input.hint':
       'İmleci hareket ettirmek için sürükle, tıklamak için dokun, çift tık için iki kez dokun. İki parmakla kaydır.',
   'input.keyboard': 'Klavye',
   'input.leftClick': 'Sol',
   'input.rightClick': 'Sağ',
+  'input.arrowLeft': 'Sol ok tuşu',
+  'input.arrowUp': 'Yukarı ok tuşu',
+  'input.arrowDown': 'Aşağı ok tuşu',
+  'input.arrowRight': 'Sağ ok tuşu',
   'input.enter': 'Enter',
   'input.backspace': 'Sil',
   'input.tab': 'Tab',
@@ -322,9 +349,36 @@ const Map<String, String> _tr = {
   'pairing.expiresIn': 'Kalan süre {n}s',
   'pairing.timedOut': 'Zaman aşımı. Tekrar denemek için yeniden başla.',
   'pairing.incorrectPin': 'Yanlış PIN. Tekrar dene.',
-  'pairing.verifying': 'Doğrulanıyor...',
   'pairing.pairedTitle': 'Eşleşti',
   'pairing.pairedSub': 'Bağlandın, eşitlemeye hazırsın.',
+  'pairing.landing.title': 'Bilgisayarını eşleştir',
+  'pairing.landing.subtitle':
+      'Panonu paylaşmak, dosya göndermek ve bilgisayarını telefonundan '
+          'kontrol etmek için Connectible ile eşleştir.',
+  'pairing.landing.cta': 'Masaüstünü Eşleştir',
+  'pairing.landing.howItWorks': 'Nasıl çalışır',
+  'pairing.landing.step1Title': "Bilgisayarında Connectible'ı aç",
+  'pairing.landing.step1Body':
+      "Ayarlar'a git ve bir eşleştirme QR kodu oluştur.",
+  'pairing.landing.step2Title': 'Kodu tara',
+  'pairing.landing.step2Body':
+      'Tarayıcıyı açmak için yukarıdaki düğmeye dokun ve ekrandaki koda '
+          'doğrult.',
+  'pairing.landing.step3Title': 'Bağlandın',
+  'pairing.landing.step3Body':
+      'Bilgisayar artık Ana ekranında görünür. Bağlantın şifreli ve PIN '
+          'ile doğrulanmış.',
+  'pairing.scan.title': 'Eşleştirmek için tara',
+  'pairing.scan.hint':
+      'Kamerayı bilgisayarında görünen QR koduna doğrult.',
+  'pairing.scan.simulate': 'Taramayı simüle et',
+  'pairing.scan.noCamera': 'Burada kamera önizlemesi yok',
+  'pairing.scan.noCameraHint':
+      'Bu cihazda kamera yok. Eşleşmeyi test etmek için taramayı simüle et.',
+  'pairing.scan.invalidCode': 'Bu bir Connectible eşleştirme kodu değil',
+  'pairing.scan.permissionDenied': 'Kamera erişimi reddedildi',
+  'pairing.scan.permissionDeniedHint':
+      "Sistem ayarlarından Connectible'a kamera erişimi ver ve tekrar dene.",
 };
 
 class AppStrings {

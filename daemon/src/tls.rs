@@ -2,8 +2,10 @@ use std::os::unix::fs::OpenOptionsExt;
 use std::path::Path;
 use std::sync::Arc;
 
-use rustls::pki_types::{CertificateDer, PrivateKeyDer};
-use rustls::ServerConfig;
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, UnixTime};
+use rustls::server::danger::{ClientCertVerified, ClientCertVerifier};
+use rustls::{DigitallySignedStruct, DistinguishedName, ServerConfig, SignatureScheme};
+use sha2::{Digest, Sha256};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::server::TlsStream;
 use tokio_rustls::TlsAcceptor;
@@ -14,6 +16,107 @@ use crate::error::{DaemonError, Result};
 use crate::ratelimit::RateLimiter;
 
 const CERT_FILE: &str = "cert.pem";
+
+/// Lowercase-hex SHA-256 of a certificate's DER encoding -- must match
+/// `desktop/core/src/tls.rs::cert_fingerprint_hex` exactly, since a
+/// device's fingerprint is computed independently on whichever side
+/// observes its certificate (the daemon here for an inbound client
+/// cert, the desktop/mobile client for an outbound server cert) and
+/// the two need to agree for pairing's TOFU pin to ever match (T-G4).
+pub fn cert_fingerprint_hex(der: &[u8]) -> String {
+    let digest = Sha256::digest(der);
+    hex::encode(digest)
+}
+
+/// Accepts *any* client certificate at the TLS layer (Phase G, T-G1) --
+/// this is intentionally not an authorization decision. Every device's
+/// certificate is self-signed with no shared CA, so there is nothing to
+/// "validate" about a client cert beyond "the client actually holds the
+/// matching private key," which rustls itself already proves via the
+/// handshake signature before `verify_client_cert` is even called.
+///
+/// The actual security check -- does this connection's certificate
+/// match what was pinned for the `device_id` it claims to be -- happens
+/// one layer up, per-RPC, against the fingerprint this verifier lets
+/// through unexamined (see `grpc/service.rs`'s pairing-gate checks and
+/// T-G5). Rejecting an unrecognized cert *here* would make first-contact
+/// pairing impossible, since a never-before-seen device has nothing
+/// pinned yet by definition.
+///
+/// Client auth is offered but not mandatory: a peer that presents no
+/// certificate at all (e.g. an older build, or mid-migration before
+/// every stack sends one) still completes the handshake; it simply has
+/// no fingerprint to check against downstream, and is treated as
+/// unauthenticated the same way a pre-Phase-G connection always was.
+#[derive(Debug)]
+struct AcceptAnyClientCert {
+    provider: Arc<rustls::crypto::CryptoProvider>,
+}
+
+impl AcceptAnyClientCert {
+    fn new() -> Self {
+        Self {
+            provider: Arc::new(rustls::crypto::ring::default_provider()),
+        }
+    }
+}
+
+impl ClientCertVerifier for AcceptAnyClientCert {
+    fn offer_client_auth(&self) -> bool {
+        true
+    }
+
+    fn client_auth_mandatory(&self) -> bool {
+        false
+    }
+
+    fn root_hint_subjects(&self) -> &[DistinguishedName] {
+        &[]
+    }
+
+    fn verify_client_cert(
+        &self,
+        _end_entity: &CertificateDer<'_>,
+        _intermediates: &[CertificateDer<'_>],
+        _now: UnixTime,
+    ) -> std::result::Result<ClientCertVerified, rustls::Error> {
+        Ok(ClientCertVerified::assertion())
+    }
+
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls12_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        cert: &CertificateDer<'_>,
+        dss: &DigitallySignedStruct,
+    ) -> std::result::Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        rustls::crypto::verify_tls13_signature(
+            message,
+            cert,
+            dss,
+            &self.provider.signature_verification_algorithms,
+        )
+    }
+
+    fn supported_verify_schemes(&self) -> Vec<SignatureScheme> {
+        self.provider
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
+}
 
 /// T-C8: per-source-IP connection accept limits. A single IP opening more
 /// than [`ACCEPTS_PER_IP`] TLS connections within [`ACCEPT_WINDOW`] is a
@@ -40,25 +143,36 @@ const KEY_FILE: &str = "key.pem";
 /// with a `ServerConfig` built via `builder_with_protocol_versions(&[
 /// &rustls::version::TLS13])`, then hands the already-decrypted stream
 /// to tonic through `Server::serve_with_incoming` (see main.rs).
-pub fn load_or_create_server_config(config: &Config) -> Result<Arc<ServerConfig>> {
-    let cert_path = config.tls_dir.join(CERT_FILE);
-    let key_path = config.tls_dir.join(KEY_FILE);
+/// Loads (generating on first run) this device's one long-lived
+/// self-signed cert/key pair as raw PEM strings, without building a
+/// `rustls::ServerConfig` around them. Split out of
+/// `load_or_create_server_config` (Phase G, T-G3) so the *same*
+/// identity can also be presented as this device's TLS *client*
+/// certificate when it connects out to a peer -- there is only ever
+/// one identity per device, used in both roles.
+pub fn load_or_create_identity_pem(tls_dir: &Path) -> Result<(String, String)> {
+    let cert_path = tls_dir.join(CERT_FILE);
+    let key_path = tls_dir.join(KEY_FILE);
 
-    let (cert_pem, key_pem) = if cert_path.exists() && key_path.exists() {
-        (
+    if cert_path.exists() && key_path.exists() {
+        Ok((
             std::fs::read_to_string(&cert_path)?,
             std::fs::read_to_string(&key_path)?,
-        )
+        ))
     } else {
-        generate_self_signed(&cert_path, &key_path)?
-    };
+        generate_self_signed(&cert_path, &key_path)
+    }
+}
+
+pub fn load_or_create_server_config(config: &Config) -> Result<Arc<ServerConfig>> {
+    let (cert_pem, key_pem) = load_or_create_identity_pem(&config.tls_dir)?;
 
     let cert_chain = parse_cert_chain(&cert_pem)?;
     let key = parse_private_key(&key_pem)?;
 
     let mut server_config =
         ServerConfig::builder_with_protocol_versions(&[&rustls::version::TLS13])
-            .with_no_client_auth()
+            .with_client_cert_verifier(Arc::new(AcceptAnyClientCert::new()))
             .with_single_cert(cert_chain, key)
             .map_err(|e| DaemonError::Tls(format!("invalid cert/key: {e}")))?;
 

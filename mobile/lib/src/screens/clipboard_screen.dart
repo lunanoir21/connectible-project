@@ -83,6 +83,7 @@ class ClipboardScreen extends StatelessWidget {
                               IconButton(
                                 icon: Icon(Icons.copy_outlined,
                                     size: 18, color: p.inkMuted),
+                                tooltip: s.t('clipboard.copy'),
                                 onPressed: () => Clipboard.setData(
                                     ClipboardData(text: entry.content)),
                               ),

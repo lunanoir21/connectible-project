@@ -8,21 +8,7 @@ encrypted, LAN-only, no cloud.
 
 Monochrome, black-and-grey UI on both desktop and mobile.
 
-```
-                 mDNS  _connectible._tcp
-        +-----------------------------------+
-        |                                   |
-  +-----+------+                      +-----+------+
-  |  Desktop   |   gRPC / TLS 1.3     |   Mobile   |
-  |  (Tauri +  |<-------------------->|  (Flutter) |
-  |   React)   |   SyncStream         |            |
-  +-----+------+                      +------------+
-        |  gRPC-loopback (Rust core)
-  +-----+------+
-  | connectibled |  Rust daemon: tokio, tonic, rustls,
-  |   (daemon)   |  mdns-sd, sqlx/SQLite
-  +--------------+
-```
+<img src="docs/assets/architecture.svg" width="760" alt="Architecture: the Desktop app (Tauri + React) and the Mobile app (Flutter) talk to each other over gRPC / TLS 1.3 (SyncStream). mDNS (_connectible._tcp) is discovery-only; connections are always direct to address:port. The desktop UI drives the connectibled Rust daemon (tokio, tonic, rustls, mdns-sd, sqlx/SQLite) over gRPC loopback.">
 
 ## Components
 
@@ -33,15 +19,18 @@ Monochrome, black-and-grey UI on both desktop and mobile.
 | `mobile/`    | Flutter + Dart + Provider                         | Built + tested (`flutter test`); needs a Flutter toolchain to build |
 | `proto/`     | `connectible.proto` (Protocol Buffers v3)         | Frozen v1 |
 
-Design docs: [PLAN.md](PLAN.md), [TASKS.md](TASKS.md), [RULES.md](RULES.md),
-[ARCHITECTURE.md](ARCHITECTURE.md), [FINDINGS.md](FINDINGS.md) (Phase 0
-gap analysis), [design-docs/](design-docs/) (design notes and
-measurements referenced by TASKS.md), and the wire protocol in
-[proto/connectible.proto](proto/connectible.proto). The project's own
-landing page (built from [docs/](docs/) via GitHub Pages) is published
-at whatever URL this repo's Pages settings point to -- `docs/` is
-publish output, not documentation to read in-repo; read the linked
-files above instead.
+All documentation lives under [docs/](docs/): the active task file
+[docs/TASKS.md](docs/TASKS.md), [docs/RULES.md](docs/RULES.md),
+[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), design notes and
+measurements in [docs/design/](docs/design/), and completed plans /
+historical task files in [docs/archive/](docs/archive/) (including
+[PLAN.md](docs/archive/PLAN.md) and the Phase 0 gap analysis
+[FINDINGS.md](docs/archive/FINDINGS.md)). Contributor/AI onboarding
+context (project map, settled decisions, conventions, known traps)
+lives in [docs/context/](docs/context/). The wire protocol is
+[proto/connectible.proto](proto/connectible.proto). `docs/` doubles as
+the GitHub Pages root, so the landing page and everything above are
+also published at whatever URL this repo's Pages settings point to.
 
 ## Quick start (desktop, one command)
 
@@ -87,6 +76,7 @@ All are optional and have sensible defaults:
 |----------|---------|--------|
 | `CONNECTIBLE_PORT` | `58231` | TCP port the gRPC server listens on and advertises via mDNS. The desktop UI reads the same variable, so overriding it only needs to be set once. |
 | `CONNECTIBLE_DEVICE_NAME` | system hostname | Name shown to peers (in `Identity` and the mDNS TXT records). |
+| `CONNECTIBLE_DB_KEY_FILE` | unset | Path to the 32-byte database-encryption key file, bypassing the OS-keyring lookup (created at that path on first use if missing) -- for headless setups. See [docs/design/db-encryption.md](docs/design/db-encryption.md). |
 | `YDOTOOL_SOCKET` | `/tmp/.ydotool_socket` | Path to the `ydotoold` socket used for X11 remote-input injection. |
 | `RUST_LOG` | `info` | Standard `tracing` env-filter (e.g. `RUST_LOG=connectibled=debug`). |
 
@@ -180,7 +170,7 @@ logins): `loginctl enable-linger "$USER"`. To stop managing it:
 `make uninstall-service` (or `systemctl --user disable --now
 connectibled` by hand). Design rationale for this unit (why
 user-level, why `Restart=on-failure` and not `always`, etc.) is in
-[design-docs/systemd-service.md](design-docs/systemd-service.md).
+[docs/design/systemd-service.md](docs/design/systemd-service.md).
 Release builds attach `connectibled.service` alongside the daemon
 binary, so a downloaded release doesn't need a repo checkout just to
 get the unit file.
@@ -220,10 +210,36 @@ not committed; regenerate them from the shared proto.
    other.
 2. Device A opens a TLS 1.3 connection to B and sends `Pair`.
 3. B generates a random 6-digit PIN (valid 30s), shows it locally.
-4. A prompts for the PIN; on match, both persist the peer to SQLite.
-5. Subsequent connections reuse TLS (cert pinning arrives in v1.0).
+4. A prompts for the PIN; on match, both sides persist the peer (the
+   daemon in SQLite, mobile in its own local store) and pin each
+   other's certificate fingerprints (TOFU -- see Security below).
+5. Subsequent connections are verified against the pinned
+   fingerprints; a peer presenting a changed certificate is rejected.
 
-Full sequence in [ARCHITECTURE.md](ARCHITECTURE.md).
+mDNS is discovery only -- the actual connection is always direct to
+`address:port`, so both apps also offer a manual "connect by address"
+fallback for networks where multicast is blocked, and the desktop app
+can show a QR code that the phone scans to pair without typing a PIN.
+
+Full sequence in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
+
+## How file transfer works
+
+There is exactly one transfer path: a dedicated streaming upload
+(`PrepareUpload` + `UploadFile`) over the same TLS + pairing layer as
+everything else. Interrupted transfers resume from the last byte the
+receiver has, and every file is verified against a streaming SHA-256
+whole-file hash before it is finalized -- a mismatch discards the
+partial file instead of saving it. (An earlier chunked-over-SyncStream
+path has been removed entirely; its proto fields are reserved.)
+
+On desktop, received files land in the OS downloads directory by
+default (the destination is configurable in the app); on mobile they
+arrive in app storage, with a per-file "Save to..." action to copy
+them anywhere via the system picker. Transfer history survives
+restarts: the daemon persists a `transfer_history` table (capped at
+500 records) covering both directions for desktop, and mobile keeps
+its own local history (capped at 200).
 
 ## Security
 
@@ -241,22 +257,40 @@ Full sequence in [ARCHITECTURE.md](ARCHITECTURE.md).
   keep re-popping the local PIN dialog.
 - Security here means "an unauthenticated peer can't read/write your
   data or drive your input without the PIN exchange" -- it is not
-  claimed as end-to-end (application-layer) encryption on top of TLS,
-  and certificate identity isn't verified beyond the PIN (see cert
-  pinning below).
+  claimed as end-to-end (application-layer) encryption on top of TLS.
+- **Certificate identity is verified via Trust-On-First-Use pinning,
+  bidirectionally.** The connecting side pins the peer's server
+  certificate fingerprint on first pair and rejects a changed one
+  thereafter (record-on-first-use); a paired daemon additionally
+  requests and pins the connecting side's client certificate the same
+  way, so a claimed device_id alone is no longer enough to be treated
+  as a paired peer -- see [docs/tofu-trust-store.md](docs/tofu-trust-store.md)
+  for the full design (including the one asymmetry: mobile's own
+  inbound server can't offer the client-cert half, a `dart:io`
+  platform limitation documented there).
+- The `cert_fingerprint` device-store column is encrypted at rest with
+  AES-256-GCM; the key comes from `CONNECTIBLE_DB_KEY_FILE` if set,
+  else the OS keyring (Secret Service), else a `0600` key file under
+  the daemon's data dir -- see
+  [docs/design/db-encryption.md](docs/design/db-encryption.md).
 
 ### Known MVP limitations (documented, not hidden)
 
-- Certificate **pinning is deferred to v1.0** -- self-signed certs are
-  accepted per-connection without trust-on-first-use.
-- SQLite device storage is **plaintext** in the MVP.
 - Remote input and clipboard sync work on both X11 (via ydotool /
   x11-clipboard) and native Wayland (via wlr-virtual-pointer/
   virtual-keyboard and wlr-data-control on wlroots compositors like
   Hyprland/Sway); a compositor supporting neither surfaces the gap as
   a missing capability flag rather than a crash or a silent
   XWayland-only fallback.
+- Clipboard sync is text-only (image support is planned).
+- Notification mirroring is display-only: dismissing a notification on
+  one device does not yet dismiss it on the other (dismiss-sync is
+  planned).
 - LAN-only; no internet relay.
+
+The remaining roadmap ([docs/TASKS.md](docs/TASKS.md) Phases K-N) covers
+those two gaps plus an end-user guide and real-device battery
+measurement.
 
 ## CI/CD
 

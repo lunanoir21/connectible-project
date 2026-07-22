@@ -151,6 +151,23 @@ describe("useDaemon", () => {
     expect(result.current.loading).toBe(false);
   });
 
+  it("keeps loadError set when the FIRST fetch fails and the second succeeds (T-X17)", async () => {
+    daemonConnected.mockResolvedValue({ ok: true, value: true });
+    // The opposite ordering from the test above and the exact T-X17 bug:
+    // getLocalState fails, but the immediately-following successful
+    // listDevices must NOT clear the error (the old per-branch
+    // `setLoadError(null)` did, making clipboard/notification panels look
+    // genuinely empty instead of failed).
+    getLocalState.mockResolvedValue({ ok: false, error: { code: "INTERNAL", message: "state boom" } });
+    listDevices.mockResolvedValue({ ok: true, value: [] });
+
+    const { result } = renderHook(() => useDaemon());
+
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    expect(result.current.loadError).toEqual({ code: "INTERNAL", message: "state boom" });
+  });
+
   it("distinguishes 'loaded and genuinely empty' (loading false, no error) from the initial loading state", async () => {
     daemonConnected.mockResolvedValue({ ok: true, value: true });
     getLocalState.mockResolvedValue({ ok: true, value: emptyState });
@@ -223,4 +240,94 @@ describe("useDaemon", () => {
     });
     expect(result.current.pairingPrompt).toBeNull();
   });
+
+  // T-X9: the poll below is the only thing that makes a newly appeared
+  // device show up "automatically" (no DeviceListChanged push event
+  // exists), so these two tests pin the polling contract itself.
+  it("polls every 5s while visible: a device appearing daemon-side shows up with no manual refresh", async () => {
+    vi.useFakeTimers();
+    try {
+      daemonConnected.mockResolvedValue({ ok: true, value: true });
+      getLocalState.mockResolvedValue({ ok: true, value: emptyState });
+      listDevices.mockResolvedValue({ ok: true, value: [] });
+
+      const { result, unmount } = renderHook(() => useDaemon());
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      expect(result.current.devices).toEqual([]);
+      expect(result.current.nearby).toEqual([]);
+
+      // A new paired device and a new nearby peer appear in the
+      // daemon's responses; the UI must pick them up on its own.
+      getLocalState.mockResolvedValue({ ok: true, value: realState });
+      listDevices.mockResolvedValue({ ok: true, value: realDevices });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000);
+      });
+
+      expect(result.current.devices).toEqual(realDevices);
+      expect(result.current.nearby).toEqual(realState.nearbyDevices);
+      unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("pauses polling while the document is hidden and catches up immediately when shown again", async () => {
+    vi.useFakeTimers();
+    try {
+      daemonConnected.mockResolvedValue({ ok: true, value: true });
+      getLocalState.mockResolvedValue({ ok: true, value: emptyState });
+      listDevices.mockResolvedValue({ ok: true, value: [] });
+
+      const { unmount } = renderHook(() => useDaemon());
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      const afterInit = listDevices.mock.calls.length;
+
+      await act(async () => {
+        setDocumentVisibility("hidden");
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(20000);
+      });
+      // Four intervals' worth of time elapsed hidden: zero polls.
+      expect(listDevices.mock.calls.length).toBe(afterInit);
+
+      await act(async () => {
+        setDocumentVisibility("visible");
+        await vi.advanceTimersByTimeAsync(0);
+      });
+      // Becoming visible triggers an immediate catch-up refresh...
+      expect(listDevices.mock.calls.length).toBe(afterInit + 1);
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5000);
+      });
+      // ...and the 5s cadence resumes.
+      expect(listDevices.mock.calls.length).toBe(afterInit + 2);
+      unmount();
+    } finally {
+      // Unshadow the prototype getter so later tests see jsdom's own
+      // (always "visible") value again.
+      Reflect.deleteProperty(document, "visibilityState");
+      vi.useRealTimers();
+    }
+  });
 });
+
+// Overrides jsdom's read-only Document.prototype.visibilityState with
+// an own-property getter (configurable, so tests can delete it to
+// restore the original), then fires the visibilitychange event the
+// hook listens for -- the same sequence a real hide/show produces.
+function setDocumentVisibility(state: DocumentVisibilityState) {
+  Object.defineProperty(document, "visibilityState", {
+    configurable: true,
+    get: () => state,
+  });
+  document.dispatchEvent(new Event("visibilitychange"));
+}

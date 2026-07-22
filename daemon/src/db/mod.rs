@@ -1,5 +1,8 @@
+pub mod history;
+pub mod keys;
 mod repository;
 
+pub use history::{NewTransferHistoryEntry, TransferHistoryRecord, TransferHistoryRepository};
 pub use repository::{DeviceRecord, DeviceRepository};
 
 use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};

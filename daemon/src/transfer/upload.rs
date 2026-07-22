@@ -32,6 +32,11 @@ pub struct UploadTicket {
     pub session_id: String,
     pub file_id: String,
     pub file_name: String,
+    /// The authenticated sender's `device_id` (Phase J), so a terminal
+    /// outcome can be attributed to a peer in `transfer_history`
+    /// without `UploadWriter`/the `upload_file` handler needing to
+    /// separately look up who's connected.
+    pub device_id: String,
     /// Destination partial file the stream is appended into.
     pub part_path: PathBuf,
     /// Declared final size, so the receiver knows when the stream is
@@ -39,7 +44,18 @@ pub struct UploadTicket {
     pub total_bytes: i64,
     /// Expected whole-file SHA-256 hex (empty = skip verification).
     pub expected_hash: String,
+    /// Sender-declared content type, forwarded verbatim in the terminal
+    /// `TransferProgress` event so the UI can pick a file-type icon.
+    pub mime_type: String,
 }
+
+/// T-security: hard ceiling on live tickets across the whole registry
+/// (all peers, all sessions combined). `PrepareUpload`'s per-call file
+/// cap and per-peer rate limit bound how fast this can be reached, but
+/// an offer that's accepted and then never followed up with `UploadFile`
+/// lingers forever (only `finish()` removes a ticket) -- across enough
+/// abandoned offers over time this still needs a hard stop.
+const MAX_TICKETS: usize = 10_000;
 
 /// Tracks accepted upload offers between `PrepareUpload` and the matching
 /// `UploadFile` stream. One instance per daemon, shared behind an `Arc`.
@@ -60,8 +76,16 @@ impl UploadRegistry {
     /// Where a given `file_id`'s partial bytes live. Keyed by the stable,
     /// deterministic `file_id` (peer+path+size+mtime) so a resumed upload
     /// reuses the exact partial a previous attempt left behind.
+    ///
+    /// `file_id` is client-supplied (`UploadFileMeta.file_id`), so it's
+    /// sanitized to a single safe path component first -- the same
+    /// traversal risk `unique_destination` guards against for
+    /// `file_name`, just via a different field. Sanitizing is a pure
+    /// function of the input, so a legitimate resume (same client
+    /// sending the same `file_id` again) still lands on the same path.
     pub fn part_path(&self, file_id: &str) -> PathBuf {
-        self.transfers_dir.join(format!("{file_id}.part"))
+        self.transfers_dir
+            .join(format!("{}.part", super::sanitize_file_name(file_id)))
     }
 
     /// Bytes already on disk for this `file_id` (its `.part` length) —
@@ -74,22 +98,33 @@ impl UploadRegistry {
 
     /// Accepts one file: mints an opaque token, records its ticket, and
     /// returns `(token, resume_offset_bytes)` for the `UploadFileOffer`.
-    pub fn accept(&self, session_id: &str, meta: &UploadFileMeta) -> (String, i64) {
+    /// Returns `None` (the offer should be reported as declined, same as
+    /// "not paired"/"no disk space") once the registry is at
+    /// [`MAX_TICKETS`] -- callers already have a per-offer rejection path
+    /// in the proto (`UploadFileOffer.accepted`), so a full registry is
+    /// surfaced the same way rather than a new error type.
+    pub fn accept(&self, session_id: &str, device_id: &str, meta: &UploadFileMeta) -> Option<(String, i64)> {
         let resume_offset = self.resume_offset(&meta.file_id);
         let token = mint_token();
         let ticket = UploadTicket {
             session_id: session_id.to_string(),
             file_id: meta.file_id.clone(),
             file_name: meta.file_name.clone(),
+            device_id: device_id.to_string(),
             part_path: self.part_path(&meta.file_id),
             total_bytes: meta.file_size_bytes,
             expected_hash: meta.file_hash.clone(),
+            mime_type: meta.mime_type.clone(),
         };
-        self.tickets
+        let mut tickets = self
+            .tickets
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(token.clone(), ticket);
-        (token, resume_offset)
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if tickets.len() >= MAX_TICKETS {
+            return None;
+        }
+        tickets.insert(token.clone(), ticket);
+        Some((token, resume_offset))
     }
 
     /// Validates an incoming `UploadFile` header against a live ticket.
@@ -118,6 +153,7 @@ impl UploadRegistry {
 }
 
 /// Terminal outcome of an `UploadFile` stream.
+#[derive(Debug)]
 pub enum UploadOutcome {
     /// Every byte arrived and (if a hash was declared) it matched; the
     /// file was moved into its final destination.
@@ -148,6 +184,7 @@ pub struct UploadWriter {
     expected_hash: String,
     total_bytes: i64,
     bytes_written: i64,
+    mime_type: String,
     hasher: Sha256,
     progress: broadcast::Sender<TransferProgress>,
     last_emit: Option<Instant>,
@@ -202,6 +239,7 @@ impl UploadWriter {
             expected_hash: ticket.expected_hash.clone(),
             total_bytes: ticket.total_bytes,
             bytes_written: offset,
+            mime_type: ticket.mime_type.clone(),
             hasher,
             progress,
             last_emit: None,
@@ -270,6 +308,7 @@ impl UploadWriter {
             total_bytes: self.total_bytes,
             completed,
             failed,
+            mime_type: self.mime_type.clone(),
         });
     }
 }
@@ -302,7 +341,9 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let reg = UploadRegistry::new(tmp.path().to_path_buf());
 
-        let (token, offset) = reg.accept("sess-1", &meta("file-a", "a.bin", 100, "deadbeef"));
+        let (token, offset) = reg
+            .accept("sess-1", "dev-sender", &meta("file-a", "a.bin", 100, "deadbeef"))
+            .expect("under the cap");
         assert_eq!(offset, 0, "no partial on disk yet");
 
         let ticket = reg
@@ -314,11 +355,59 @@ mod tests {
         assert_eq!(ticket.part_path, tmp.path().join("file-a.part"));
     }
 
+    /// Regression test: `file_id` is client-supplied (`UploadFileMeta`),
+    /// so `part_path` must sanitize it the same way `unique_destination`
+    /// sanitizes `file_name` -- a malicious `file_id` claiming to escape
+    /// `transfers_dir` must not actually do so.
+    #[test]
+    fn accept_sanitizes_a_malicious_file_id_to_stay_inside_transfers_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = UploadRegistry::new(tmp.path().to_path_buf());
+
+        let (_token, _) = reg
+            .accept(
+                "sess-1",
+                "dev-sender",
+                &meta("../../../../etc/cron.d/evil", "a.bin", 100, "deadbeef"),
+            )
+            .expect("under the cap");
+        let part_path = reg.part_path("../../../../etc/cron.d/evil");
+
+        assert!(
+            part_path.starts_with(tmp.path()),
+            "part_path {part_path:?} escaped transfers_dir {:?}",
+            tmp.path()
+        );
+        assert_eq!(part_path, tmp.path().join("evil.part"));
+    }
+
+    #[test]
+    fn accept_declines_once_the_registry_is_full() {
+        let tmp = tempfile::tempdir().unwrap();
+        let reg = UploadRegistry::new(tmp.path().to_path_buf());
+
+        for i in 0..MAX_TICKETS {
+            let m = meta(&format!("file-{i}"), "a.bin", 10, "");
+            assert!(
+                reg.accept("sess-flood", "dev-sender", &m).is_some(),
+                "ticket {i} should still be under the cap"
+            );
+        }
+
+        let overflow = meta("one-too-many", "a.bin", 10, "");
+        assert!(
+            reg.accept("sess-flood", "dev-sender", &overflow).is_none(),
+            "registry must decline once MAX_TICKETS is reached"
+        );
+    }
+
     #[test]
     fn resolve_rejects_wrong_file_id_session_or_unknown_token() {
         let tmp = tempfile::tempdir().unwrap();
         let reg = UploadRegistry::new(tmp.path().to_path_buf());
-        let (token, _) = reg.accept("sess-1", &meta("file-a", "a.bin", 10, ""));
+        let (token, _) = reg
+            .accept("sess-1", "dev-sender", &meta("file-a", "a.bin", 10, ""))
+            .expect("under the cap");
 
         assert!(reg.resolve("sess-1", "file-b", &token).is_none(), "wrong file_id");
         assert!(reg.resolve("sess-2", "file-a", &token).is_none(), "wrong session");
@@ -332,10 +421,54 @@ mod tests {
         // Simulate 42 bytes already received for file-a.
         std::fs::write(reg.part_path("file-a"), vec![0u8; 42]).unwrap();
 
-        let (token, offset) = reg.accept("s", &meta("file-a", "a.bin", 100, ""));
+        let (token, offset) = reg
+            .accept("s", "dev-sender", &meta("file-a", "a.bin", 100, ""))
+            .expect("under the cap");
         assert_eq!(offset, 42, "resume offset is the partial length");
 
         reg.finish(&token);
         assert!(reg.resolve("s", "file-a", &token).is_none(), "finished token is gone");
+    }
+
+    /// Phase I / T-I6: ported from the removed legacy chunk-path's
+    /// `malicious_file_name_cannot_escape_dest_dir` (`transfer/mod.rs`),
+    /// which proved this exact property through `TransferManager::begin`
+    /// + `write_chunk`. `sanitize_file_name`'s own unit tests
+    /// (`transfer/mod.rs`) prove the sanitizer itself is correct; this
+    /// proves `UploadWriter::finish` actually calls it on the real
+    /// finalize path, not just that the property holds in isolation.
+    #[tokio::test]
+    async fn finish_sanitizes_a_malicious_file_name_to_stay_inside_dest_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let part_path = tmp.path().join("evil.part");
+        let ticket = UploadTicket {
+            session_id: "sess-1".to_string(),
+            file_id: "file-evil".to_string(),
+            file_name: "../../../../etc/cron.d/evil".to_string(),
+            device_id: "dev-sender".to_string(),
+            part_path: part_path.clone(),
+            total_bytes: 6,
+            expected_hash: String::new(),
+            mime_type: "text/plain".to_string(),
+        };
+        let (progress_tx, _progress_rx) = broadcast::channel(4);
+        let mut writer = UploadWriter::open(&ticket, 0, progress_tx)
+            .await
+            .expect("open writer");
+        writer.write(b"gotcha").await.expect("write");
+
+        let dest_dir = tmp.path().join("dest");
+        let outcome = writer.finish(&dest_dir).await.expect("finish");
+
+        match outcome {
+            UploadOutcome::Completed { path, .. } => {
+                assert!(
+                    path.starts_with(&dest_dir),
+                    "finalized path {path:?} escaped dest_dir {dest_dir:?}"
+                );
+                assert_eq!(path.file_name().unwrap().to_str().unwrap(), "evil");
+            }
+            other => panic!("expected Completed outcome, got {other:?}"),
+        }
     }
 }

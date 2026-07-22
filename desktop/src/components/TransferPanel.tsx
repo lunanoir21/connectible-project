@@ -2,13 +2,13 @@ import { useEffect, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrentWebview } from "@tauri-apps/api/webview";
 import { ipc, type IpcError } from "../lib/ipc";
-import type { Device, NearbyDevice, TransferProgress } from "../lib/types";
-import { formatBytes, transferPercent } from "../lib/format";
+import type { Device, NearbyDevice, TransferHistoryEntry, TransferProgress } from "../lib/types";
+import { formatBytes, formatRelativeTime, transferPercent } from "../lib/format";
 import { errorCodeMessage } from "../lib/errors";
 import { EmptyState } from "./EmptyState";
 import { ErrorState } from "./ErrorState";
 import { Icon } from "./Icon";
-import { useT, type Translate } from "../i18n";
+import { useT, useI18n, type Locale, type Translate } from "../i18n";
 
 interface TransferPanelProps {
   transfers: Record<string, TransferProgress>;
@@ -52,8 +52,9 @@ function TransferListSkeleton() {
 /// send, live incoming/outgoing progress rendered as constellation-style
 /// "ties" (one endpoint per device), and native folder/file reveal that
 /// actually works across Linux desktops (see commands::open_path).
-export function TransferPanel({ transfers, nearby, loading, loadError, onRefresh }: TransferPanelProps) {
+export function TransferPanel({ transfers, devices, nearby, loading, loadError, onRefresh }: TransferPanelProps) {
   const t = useT();
+  const { locale } = useI18n();
   const [error, setError] = useState<string | null>(null);
   const [sending, setSending] = useState(false);
   const [dragging, setDragging] = useState(false);
@@ -69,6 +70,22 @@ export function TransferPanel({ transfers, nearby, loading, loadError, onRefresh
   // Received files aren't here -- the daemon writes those, so incoming
   // rows reveal the download folder instead.
   const sentPaths = useRef<Map<string, string>>(new Map());
+
+  // Phase J: history persisted daemon-side, fetched once on mount so a
+  // transfer completed before an app restart still shows up (the live
+  // `transfers` prop alone resets to empty on every launch). Merged
+  // below with the in-session `transfers`-derived history so a just-
+  // finished transfer never flickers out waiting for a fetch.
+  const [persistedHistory, setPersistedHistory] = useState<TransferHistoryEntry[]>([]);
+  useEffect(() => {
+    let cancelled = false;
+    void ipc.listTransferHistory().then((result) => {
+      if (!cancelled && result.ok) setPersistedHistory(result.value);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   async function sendPaths(paths: string[]) {
     setError(null);
@@ -152,9 +169,24 @@ export function TransferPanel({ transfers, nearby, loading, loadError, onRefresh
     };
   }, []);
 
-  const rows = Object.values(transfers).sort((a, b) => b.transferId.localeCompare(a.transferId));
-  const active = rows.filter((r) => !r.completed && !r.failed);
-  const history = rows.filter((r) => r.completed || r.failed);
+  const allRows = Object.values(transfers);
+  const active = allRows.filter((r) => !r.completed && !r.failed);
+  const liveHistory = allRows.filter((r) => r.completed || r.failed);
+
+  // Merge live (this-session) history with persisted (survives-restart)
+  // history: a transferId present in both means it just finished in
+  // this session, so the richer live row wins over the persisted one.
+  // T-X16: sort the merged list by finish time descending (most recent
+  // first) instead of by transferId hash -- live rows carry a
+  // client-stamped `finishedAtMs` (useDaemon), persisted rows carry the
+  // daemon's, so both directions order coherently.
+  const liveHistoryIds = new Set(liveHistory.map((r) => r.transferId));
+  const persistedRows = persistedHistory
+    .filter((e) => !liveHistoryIds.has(e.transferId))
+    .map(historyEntryToProgress);
+  const history = [...liveHistory, ...persistedRows].sort(
+    (a, b) => (b.finishedAtMs ?? 0) - (a.finishedAtMs ?? 0),
+  );
 
   return (
     <section className="relative flex h-full flex-col gap-5 animate-fade-in">
@@ -210,21 +242,21 @@ export function TransferPanel({ transfers, nearby, loading, loadError, onRefresh
           retryLabel={onRefresh ? t("common.refresh") : undefined}
           onRetry={onRefresh}
         />
-      ) : rows.length === 0 ? (
+      ) : active.length === 0 && history.length === 0 ? (
         <EmptyState icon="transfer" title={t("transfers.emptyTitle")} hint={t("transfers.emptyHint")} />
       ) : (
         <div className="flex min-h-0 flex-1 flex-col gap-4 overflow-y-auto pr-1">
           {active.length > 0 && (
             <TransferGroup label={t("transfers.sectionActive")}>
               {active.map((row) => (
-                <TransferRow key={row.transferId} row={row} t={t} onOpenFolder={openReceivedFolder} onOpenFile={openSentFile} canOpenFile={sentPaths.current.has(row.transferId)} />
+                <TransferRow key={row.transferId} row={row} t={t} devices={devices} locale={locale} onOpenFolder={openReceivedFolder} onOpenFile={openSentFile} canOpenFile={sentPaths.current.has(row.transferId)} />
               ))}
             </TransferGroup>
           )}
           {history.length > 0 && (
             <TransferGroup label={t("transfers.sectionHistory")}>
               {history.map((row) => (
-                <TransferRow key={row.transferId} row={row} t={t} onOpenFolder={openReceivedFolder} onOpenFile={openSentFile} canOpenFile={sentPaths.current.has(row.transferId)} />
+                <TransferRow key={row.transferId} row={row} t={t} devices={devices} locale={locale} onOpenFolder={openReceivedFolder} onOpenFile={openSentFile} canOpenFile={sentPaths.current.has(row.transferId)} />
               ))}
             </TransferGroup>
           )}
@@ -257,18 +289,31 @@ function TransferGroup({ label, children }: { label: string; children: React.Rea
 function TransferRow({
   row,
   t,
+  devices,
+  locale,
   onOpenFolder,
   onOpenFile,
   canOpenFile,
 }: {
   row: TransferProgress;
   t: Translate;
+  devices: Device[];
+  locale: Locale;
   onOpenFolder: () => void;
   onOpenFile: (transferId: string) => void;
   canOpenFile: boolean;
 }) {
   const outgoing = row.direction === "outgoing";
   const done = row.completed && !row.failed;
+  // T-X16: "to whom, when" for history rows. Peer name resolves the
+  // persisted device_id against the live devices list, falling back to a
+  // shortened id for a since-forgotten peer; both are only present on
+  // rows built from persisted history (a live in-session row carries
+  // neither), so the meta line simply doesn't render for active rows.
+  const peerName = row.peerDeviceId
+    ? (devices.find((d) => d.deviceId === row.peerDeviceId)?.deviceName ?? shortDeviceId(row.peerDeviceId))
+    : null;
+  const timeLabel = row.finishedAtMs ? formatRelativeTime(row.finishedAtMs, locale) : null;
   return (
     <div className="card px-4 py-3.5">
       <div className="flex items-center gap-3">
@@ -285,6 +330,11 @@ function TransferRow({
             {statusLabel(row, t)} - {formatBytes(row.bytesTransferred)}
             {row.totalBytes > 0 && ` / ${formatBytes(row.totalBytes)}`}
           </p>
+          {(peerName || timeLabel) && (
+            <p className="nums text-[11px] text-ink-faint">
+              {[peerName, timeLabel].filter(Boolean).join(" - ")}
+            </p>
+          )}
         </div>
         <span className="nums text-xs font-medium text-ink-muted">
           {transferPercent(row.bytesTransferred, row.totalBytes)}%
@@ -358,6 +408,41 @@ function Tie({ transfer }: { transfer: TransferProgress }) {
       />
     </div>
   );
+}
+
+/// Adapts a persisted (Phase J) history row to the `TransferProgress`
+/// shape `TransferRow` already knows how to render. Terminal by
+/// construction, so `bytesTransferred` is approximated as `totalBytes`
+/// -- the exact in-flight byte count was never persisted, only the
+/// final outcome. Carries `peerDeviceId`/`finishedAtMs` through for the
+/// row's "to whom, when" line and the chronological sort (T-X16).
+function historyEntryToProgress(entry: TransferHistoryEntry): TransferProgress {
+  return {
+    transferId: entry.transferId,
+    fileName: entry.fileName,
+    bytesTransferred: entry.totalBytes,
+    totalBytes: entry.totalBytes,
+    completed: entry.status === "completed",
+    // T-X16: a canceled transfer is terminal, not active. Mapping it to
+    // `failed: true` (mirroring how a live cancel is reported,
+    // core/src/remote.rs) keeps it out of the active filter and, in the
+    // row, suppresses both the shimmer tie and the (nonsensical) Cancel
+    // button that `failed: false` would otherwise render on a finished
+    // transfer.
+    failed: entry.status === "failed" || entry.status === "canceled",
+    canceled: entry.status === "canceled",
+    direction: entry.direction,
+    mimeType: "",
+    peerDeviceId: entry.peerDeviceId,
+    finishedAtMs: entry.finishedAtMs,
+  };
+}
+
+// First 8 chars of a device id, for a peer that is no longer in the
+// live devices list (forgotten/offline) so a history row still shows
+// *something* identifying rather than a blank.
+function shortDeviceId(id: string): string {
+  return id.length <= 8 ? id : `${id.slice(0, 8)}...`;
 }
 
 function statusLabel(row: TransferProgress, t: Translate): string {

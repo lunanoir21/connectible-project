@@ -3,14 +3,15 @@ use std::path::PathBuf;
 use connectibled::proto::connectible::v1::connectible_client::ConnectibleClient;
 use connectibled::proto::connectible::v1::{
     DisconnectDeviceRequest, ForgetDeviceRequest, GetLocalStateRequest,
-    GetPinnedFingerprintRequest, ListDevicesRequest, LocalEvent, LocalEventsRequest, PingRequest,
-    RecordFingerprintRequest, RunDiagnosticsRequest, SetClipboardSyncEnabledRequest,
-    SetRemoteInputEnabledRequest,
+    GetPinnedFingerprintRequest, ListDevicesRequest, ListTransferHistoryRequest, LocalEvent,
+    LocalEventsRequest, PingRequest, PreArmPairingCodeRequest, RecordFingerprintRequest,
+    RecordTransferHistoryRequest, RunDiagnosticsRequest, SetClipboardSyncEnabledRequest,
+    SetRemoteInputEnabledRequest, TransferHistoryEntry,
 };
 use tonic::transport::{Certificate, Channel, ClientTlsConfig};
 use tonic::Streaming;
 
-use crate::dto::{DeviceDto, LocalStateDto};
+use crate::dto::{DeviceDto, LocalStateDto, TransferHistoryEntryDto};
 use crate::{DesktopError, Result};
 
 /// Client for the *local* daemon over loopback TLS (T-033's role,
@@ -45,23 +46,63 @@ pub fn default_daemon_port() -> u16 {
         .unwrap_or(58231)
 }
 
+/// Interface name prefixes that identify a virtual/container/VPN
+/// adapter rather than a real LAN link. These addresses are technically
+/// "private" by IP-range rules and can otherwise sort ahead of the real
+/// Wi-Fi/Ethernet address purely by numeric luck (e.g. Docker's default
+/// bridge, 172.17.0.1, sorts before a 192.168.x.x Wi-Fi address). Not
+/// exhaustive -- the goal is filtering out the handful of interfaces
+/// that show up constantly on dev machines, not perfect coverage of
+/// every virtual adapter naming scheme in existence.
+const VIRTUAL_IFACE_PREFIXES: &[&str] = &[
+    "docker", // Docker's default bridge (docker0) and related
+    "br-",    // Docker user-defined bridge networks
+    "veth",   // Docker/container veth pairs
+    "vmnet",  // VMware host-only/NAT adapters
+    "utun",   // macOS VPN tunnel interfaces
+];
+
+fn is_virtual_iface_name(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    VIRTUAL_IFACE_PREFIXES
+        .iter()
+        .any(|prefix| lower.starts_with(prefix))
+}
+
 /// This machine's usable LAN IPv4 addresses, so the desktop can show
 /// its own "connect by address" endpoint the way mobile already does
 /// (the webview can't enumerate interfaces itself). Loopback and
 /// link-local (169.254.x.x) addresses are dropped -- a peer can't reach
-/// this device on either -- and the rest are ordered so a private-LAN
+/// this device on either -- as are addresses on well-known virtual/
+/// container/VPN interfaces (Docker bridges, veth pairs, vmnet, macOS
+/// VPN tunnels), which would otherwise be indistinguishable from a real
+/// LAN address by IP range alone. The rest are ordered so a private-LAN
 /// address (192.168/10/172.16-31) sorts ahead of anything else, since
 /// that's overwhelmingly the one the user wants to hand out.
 pub fn local_ipv4_addresses() -> Vec<String> {
     let Ok(ifaces) = if_addrs::get_if_addrs() else {
         return Vec::new();
     };
-    let mut addrs: Vec<std::net::Ipv4Addr> = ifaces
+    let named: Vec<(String, std::net::Ipv4Addr)> = ifaces
         .into_iter()
         .filter_map(|iface| match iface.addr {
-            if_addrs::IfAddr::V4(v4) => Some(v4.ip),
+            if_addrs::IfAddr::V4(v4) => Some((iface.name, v4.ip)),
             if_addrs::IfAddr::V6(_) => None,
         })
+        .collect();
+    filter_and_sort_ipv4(named)
+}
+
+/// The filtering/ordering logic behind [`local_ipv4_addresses`], pulled
+/// out as a pure function of `(interface name, address)` pairs so it can
+/// be exercised in tests against synthetic interfaces (e.g. a
+/// docker0-shaped one) without depending on the real host's network
+/// configuration.
+fn filter_and_sort_ipv4(ifaces: Vec<(String, std::net::Ipv4Addr)>) -> Vec<String> {
+    let mut addrs: Vec<std::net::Ipv4Addr> = ifaces
+        .into_iter()
+        .filter(|(name, _)| !is_virtual_iface_name(name))
+        .map(|(_, ip)| ip)
         .filter(|ip| !ip.is_loopback() && !ip.is_link_local())
         .collect();
     addrs.sort_by_key(|ip| (!ip.is_private(), ip.octets()));
@@ -295,6 +336,20 @@ impl LocalDaemonClient {
         Ok(response.enabled)
     }
 
+    /// Pre-generates a PIN for a pairing QR code (scan-to-pair, T-2.QR):
+    /// the returned code is exactly what a subsequent `Pair` call from
+    /// anywhere will be checked against (see `PairingManager::pre_arm`
+    /// on the daemon side), so the desktop UI can embed it directly in
+    /// the QR payload with no extra confirmation step needed.
+    pub async fn pre_arm_pairing_code(&self) -> Result<crate::dto::PairingCodeDto> {
+        let mut client = self.client.clone();
+        let response = client
+            .pre_arm_pairing_code(PreArmPairingCodeRequest {})
+            .await?
+            .into_inner();
+        Ok(response.into())
+    }
+
     /// Opens the loopback-only local event stream (pairing prompts,
     /// battery, notifications, clipboard history, transfer progress).
     /// The caller (Tauri shell) forwards each event to the frontend.
@@ -305,6 +360,54 @@ impl LocalDaemonClient {
             .await?
             .into_inner();
         Ok(stream)
+    }
+
+    /// Phase J: reports the outcome of an outgoing send this process
+    /// drove itself directly against a remote peer's daemon (`send_file`
+    /// via `RemoteDeviceClient::upload_file`) -- the local daemon has no
+    /// other way to learn about it, unlike an incoming transfer.
+    /// Best-effort from the caller's point of view: a failure here
+    /// should be logged, not surfaced as if the transfer itself failed.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn record_transfer_history(
+        &self,
+        transfer_id: &str,
+        peer_device_id: &str,
+        file_name: &str,
+        total_bytes: i64,
+        direction: &str,
+        status: &str,
+        started_at_ms: i64,
+        finished_at_ms: i64,
+    ) -> Result<()> {
+        let mut client = self.client.clone();
+        client
+            .record_transfer_history(RecordTransferHistoryRequest {
+                entry: Some(TransferHistoryEntry {
+                    transfer_id: transfer_id.to_string(),
+                    peer_device_id: peer_device_id.to_string(),
+                    file_name: file_name.to_string(),
+                    total_bytes,
+                    direction: direction.to_string(),
+                    status: status.to_string(),
+                    started_at_ms,
+                    finished_at_ms,
+                }),
+            })
+            .await?;
+        Ok(())
+    }
+
+    /// Phase J: persisted transfer history, most recent first (both
+    /// directions -- incoming rows the daemon wrote itself, outgoing
+    /// rows relayed in via `record_transfer_history` above).
+    pub async fn list_transfer_history(&self, limit: i32) -> Result<Vec<TransferHistoryEntryDto>> {
+        let mut client = self.client.clone();
+        let response = client
+            .list_transfer_history(ListTransferHistoryRequest { limit })
+            .await?
+            .into_inner();
+        Ok(response.entries.into_iter().map(Into::into).collect())
     }
 }
 
@@ -337,5 +440,31 @@ mod tests {
                 seen_public = true;
             }
         }
+    }
+
+    #[test]
+    fn docker_bridge_is_excluded_even_though_it_sorts_first_numerically() {
+        // 172.17.0.1 (docker0) would otherwise sort ahead of 192.168.1.42
+        // (the real Wi-Fi/LAN address) purely because 172 < 192 -- this
+        // is the exact scenario the interface-name filter exists for.
+        let ifaces = vec![
+            ("docker0".to_string(), "172.17.0.1".parse().unwrap()),
+            ("wlan0".to_string(), "192.168.1.42".parse().unwrap()),
+        ];
+        let addrs = filter_and_sort_ipv4(ifaces);
+        assert_eq!(addrs, vec!["192.168.1.42".to_string()]);
+    }
+
+    #[test]
+    fn other_virtual_interface_names_are_excluded() {
+        let ifaces = vec![
+            ("br-abc123".to_string(), "172.20.0.1".parse().unwrap()),
+            ("veth1234".to_string(), "172.21.0.5".parse().unwrap()),
+            ("vmnet8".to_string(), "172.16.99.1".parse().unwrap()),
+            ("utun3".to_string(), "10.8.0.2".parse().unwrap()),
+            ("eth0".to_string(), "10.0.0.5".parse().unwrap()),
+        ];
+        let addrs = filter_and_sort_ipv4(ifaces);
+        assert_eq!(addrs, vec!["10.0.0.5".to_string()]);
     }
 }

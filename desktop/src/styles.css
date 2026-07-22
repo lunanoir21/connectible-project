@@ -51,91 +51,34 @@
   100% { transform: scale(1.7); opacity: 0; }
 }
 
-/* --- Home constellation (signature) --------------------------------
-   The home hero: this device at the center, peers as stars on orbits,
-   with the tie between them encoding the link state. Motion is
-   orchestrated as a single page-load sequence (center -> ties draw
-   outward -> stars land), then settles into two quiet ambient loops:
-   a heartbeat traveling each live tie, and a slow halo on live stars.
-   All coords live in the SVG user space, so the pieces scale together
-   and the ties stay welded to their stars (no rAF, no drift). The
-   global reduce-motion rule above collapses every one of these. */
+/* --- Pairing glyph motion --------------------------------------------
+   The home constellation these were originally built for (T-2.4) is
+   gone -- PairingDialog's two-node linking glyph is the only remaining
+   consumer of .cnst-pulse/.cnst-halo, so only those two survive here.
+   The global reduce-motion rule above collapses both. */
 
-/* A tie drawing itself from the center out to a star. --len is the
-   tie's pixel length, set inline per line so the dash covers exactly
-   its own length. */
-@keyframes cnst-tie-draw {
-  from { stroke-dashoffset: var(--len, 200); }
-  to { stroke-dashoffset: 0; }
-}
-
-/* A star landing at the end of its tie. */
-@keyframes cnst-star-in {
-  from { opacity: 0; transform: scale(0.3); }
-  to { opacity: 1; transform: scale(1); }
-}
-
-@keyframes cnst-fade {
-  from { opacity: 0; }
-  to { opacity: 1; }
-}
-
-/* The heartbeat: a short bright dash sliding center -> star along a
-   live tie. pathLength is normalized to 100 so every tie pulses at the
-   same cadence regardless of its real length. */
+/* The heartbeat: a short bright dash sliding along the tie between the
+   two glyph nodes. pathLength is normalized to 100 so it pulses at a
+   fixed cadence regardless of the tie's real length. */
 @keyframes cnst-pulse-travel {
   from { stroke-dashoffset: 100; }
   to { stroke-dashoffset: 0; }
 }
 
-/* Halo breathing out from a live star / the live center. */
+/* Halo breathing out from a live node. */
 @keyframes cnst-halo {
   0% { opacity: 0.5; transform: scale(1); }
   70% { opacity: 0; transform: scale(2.1); }
   100% { opacity: 0; transform: scale(2.1); }
 }
 
-/* Faint background stars drawing a slow breath. */
-@keyframes cnst-twinkle {
-  0%, 100% { opacity: 0.1; }
-  50% { opacity: 0.42; }
-}
-
-.cnst-tie {
-  stroke-dasharray: var(--len);
-  stroke-dashoffset: var(--len);
-  animation: cnst-tie-draw 0.7s cubic-bezier(0.16, 1, 0.3, 1) forwards;
-}
 .cnst-pulse {
   animation: cnst-pulse-travel 2.6s linear infinite;
-}
-.cnst-star-in {
-  transform-box: fill-box;
-  transform-origin: center;
-  animation: cnst-star-in 0.5s cubic-bezier(0.16, 1, 0.3, 1) backwards;
-}
-.cnst-label {
-  animation: cnst-fade 0.5s ease backwards;
 }
 .cnst-halo {
   transform-box: fill-box;
   transform-origin: center;
   animation: cnst-halo 2.6s cubic-bezier(0.4, 0, 0.2, 1) infinite;
-}
-.cnst-twinkle {
-  animation: cnst-twinkle var(--tw, 4s) ease-in-out infinite;
-}
-/* Focus ring for a keyboard-selected star (SVG can't use outline well). */
-.cnst-node {
-  cursor: pointer;
-  outline: none;
-}
-.cnst-focus {
-  opacity: 0;
-  transition: opacity 0.12s ease;
-}
-.cnst-node:focus-visible .cnst-focus {
-  opacity: 1;
 }
 
 @layer base {

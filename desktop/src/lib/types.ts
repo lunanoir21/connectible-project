@@ -61,6 +61,29 @@ export interface TransferProgress {
   failed: boolean;
   canceled: boolean;
   direction: "incoming" | "outgoing";
+  // Sender-declared content type, forwarded from the daemon (dedicated
+  // upload path only -- see the daemon's TransferProgress proto comment
+  // for why outgoing/legacy-path transfers leave this empty).
+  mimeType: string;
+  // T-X16 display aids, not part of the daemon DTO. `finishedAtMs` is
+  // stamped client-side by useDaemon the moment a live transfer reaches
+  // a terminal state, so the history list can sort chronologically;
+  // `peerDeviceId` is only present on rows built from persisted history
+  // (a live in-session TransferProgress doesn't carry a peer id).
+  finishedAtMs?: number;
+  peerDeviceId?: string;
+}
+
+// Phase J: one persisted transfer_history row (both directions).
+export interface TransferHistoryEntry {
+  transferId: string;
+  peerDeviceId: string;
+  fileName: string;
+  totalBytes: number;
+  direction: "incoming" | "outgoing";
+  status: "completed" | "failed" | "canceled";
+  startedAtMs: number;
+  finishedAtMs: number;
 }
 
 export interface PairingPrompt {
@@ -87,13 +110,29 @@ export interface PairOutcome {
   pinExpiresAtMs: number;
 }
 
+// A pre-generated pairing code for a QR (scan-to-pair). pinCode is
+// exactly what a subsequent Pair/ConfirmPin exchange checks against.
+export interface PairingCode {
+  pinCode: string;
+  pinExpiresAtMs: number;
+}
+
+// Fired once the requester confirms the PIN this device was showing
+// (responder side) -- the dialog otherwise has no way to learn it
+// succeeded and would sit on the code until the countdown expires.
+export interface PairingCompletion {
+  requesterDeviceId: string;
+  requesterDeviceName: string;
+}
+
 // Discriminated union mirroring dto.rs LocalEventDto (serde tag="kind").
 export type LocalEvent =
   | { kind: "pairingRequested"; prompt: PairingPrompt }
   | { kind: "battery"; battery: Battery }
   | { kind: "notification"; notification: Notification }
   | { kind: "clipboard"; entry: ClipboardEntry }
-  | { kind: "transferProgress"; progress: TransferProgress };
+  | { kind: "transferProgress"; progress: TransferProgress }
+  | { kind: "pairingCompleted"; completion: PairingCompletion };
 
 export interface DaemonStatus {
   connected: boolean;

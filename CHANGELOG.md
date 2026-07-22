@@ -86,7 +86,7 @@ each at version 0.1.0.
   (including error/timeout paths) for every model, plus a
   `PairingModel` test suite driving a real loopback TLS server.
 - A manual cross-platform test pass recorded in
-  `design-docs/manual-test-log.md`, including real two-daemon pairing
+  `docs/design/manual-test-log.md`, including real two-daemon pairing
   and clipboard sync verified on Hyprland; Linux<->Android and
   true-X11 pairs are documented as open pending hardware access.
 

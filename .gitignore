@@ -33,3 +33,29 @@ mobile/.flutter-plugins-dependencies
 # Editor / OS
 *.swp
 .DS_Store
+*~
+.idea/
+.vscode/
+
+# Flutter DevTools local options (editor-generated, machine-specific)
+mobile/devtools_options.yaml
+
+# Stray root-level node_modules: there is no root package.json; frontend
+# deps live under desktop/. Never commit an accidental root install.
+/node_modules
+
+# Claude Code / agent tooling: keep shared config (launch.json) but never
+# commit machine-local settings (permission grants) or local worktrees.
+.claude/settings.local.json
+.claude/worktrees/
+
+# Secrets / environment -- never commit. The daemon's runtime TLS certs
+# and DB key live under the XDG data dir (outside the repo), but guard
+# against an accidental in-repo secret regardless.
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.keystore
+secrets.*

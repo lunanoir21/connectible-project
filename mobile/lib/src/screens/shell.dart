@@ -15,8 +15,8 @@ import 'settings_screen.dart';
 import 'transfers_screen.dart';
 
 /// Top-level shell: a monochrome top bar + bottom navigation between the
-/// five mobile sections. The device list lives inside Home (the radar),
-/// so the bottom bar stays to five tabs.
+/// five mobile sections. The device list lives inside Home's plain
+/// grouped-card list, so the bottom bar stays to five tabs.
 class AppShell extends StatefulWidget {
   const AppShell({super.key});
 
@@ -29,8 +29,8 @@ class _AppShellState extends State<AppShell>
   int _index = 0;
 
   // Drives a short fade + rise each time the visible tab changes. The
-  // IndexedStack below keeps every screen alive (so the radar controller
-  // and scroll positions survive), while this makes the switch feel
+  // IndexedStack below keeps every screen alive (so scroll positions and
+  // in-flight state survive), while this makes the switch feel
   // deliberate instead of an instant hard cut.
   late final AnimationController _switch;
   late final Animation<double> _fade;
@@ -165,7 +165,7 @@ class _AppShellState extends State<AppShell>
             child: Row(
               children: [
                 _NavItem(
-                    icon: Icons.radar_outlined,
+                    icon: Icons.home_outlined,
                     label: s.t('nav.home'),
                     active: _index == 0,
                     onTap: () => _select(0)),

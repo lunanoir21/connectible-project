@@ -7,7 +7,7 @@ import { errorCodeMessage } from "../lib/errors";
 import { EmptyState } from "./EmptyState";
 import { ErrorState } from "./ErrorState";
 import { Icon } from "./Icon";
-import { useT } from "../i18n";
+import { useT, useI18n } from "../i18n";
 
 interface ClipboardPanelProps {
   entries: ClipboardEntry[];
@@ -40,6 +40,7 @@ function ClipboardListSkeleton() {
 /// Clipboard history (T-037): preview + source + time, with copy-back.
 export function ClipboardPanel({ entries, loading, loadError, onRefresh }: ClipboardPanelProps) {
   const t = useT();
+  const { locale } = useI18n();
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
 
   async function copyBack(entry: ClipboardEntry, index: number) {
@@ -98,7 +99,7 @@ export function ClipboardPanel({ entries, loading, loadError, onRefresh }: Clipb
                   />
                   <span>{local ? t("clipboard.thisDevice") : entry.source}</span>
                   <span className="text-ink-ghost">-</span>
-                  <span>{formatRelativeTime(entry.capturedAtMs)}</span>
+                  <span>{formatRelativeTime(entry.capturedAtMs, locale)}</span>
                 </div>
               </li>
             );

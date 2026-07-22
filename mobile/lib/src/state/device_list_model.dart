@@ -119,16 +119,44 @@ class DeviceListModel extends ChangeNotifier {
   /// confirmed by the peer). Persists it as a known paired device. Called
   /// by [PairingModel.onPeerPaired].
   void addPairedDevice(pb.Identity requester) {
+    _upsertPairedPeer(
+      deviceId: requester.deviceId,
+      deviceName: requester.deviceName,
+      platform: _platformName(requester.platform),
+    );
+  }
+
+  /// This phone completed pairing *to* a remote responder (requester side,
+  /// PIN confirmed on this phone -- T-X1). Persists the peer using the
+  /// identity data mDNS discovery / manual connect already provided, so a
+  /// phone-initiated pairing survives an app restart exactly like a
+  /// responder-side one, desktop->phone pushes pass the paired-store gate,
+  /// and the TOFU fingerprint pin has a row to land on. Called by
+  /// [PairingModel.confirmPin] on success.
+  void addPairedDeviceFromNearby(NearbyDevice device) {
+    _upsertPairedPeer(
+      deviceId: device.deviceId,
+      deviceName: device.deviceName,
+      platform: device.platform,
+    );
+  }
+
+  /// Shared upsert for both pairing directions: newest row wins (a
+  /// deliberate re-pair replaces the old entry, dropping any stale cert
+  /// fingerprint so the fresh one can be pinned right after).
+  void _upsertPairedPeer({
+    required String deviceId,
+    required String deviceName,
+    required String platform,
+  }) {
     final now = DateTime.now().millisecondsSinceEpoch;
     final peer = DeviceInfo(
-      deviceId: requester.deviceId,
-      deviceName: requester.deviceName.isEmpty
-          ? 'Unknown device'
-          : requester.deviceName,
+      deviceId: deviceId,
+      deviceName: deviceName.isEmpty ? 'Unknown device' : deviceName,
       online: true,
       pairedAtMs: now,
       lastSeenMs: now,
-      platform: _platformName(requester.platform),
+      platform: platform,
     );
     _pairedStore = [
       peer,
@@ -247,12 +275,20 @@ class DeviceListModel extends ChangeNotifier {
     for (final d in fromConnection) {
       byId[d.deviceId] = d;
     }
+    // A peer's ListDevices response includes *this phone* as one of its
+    // paired devices; without this filter the phone showed up in its own
+    // "Paired" list mid-session (T-X4).
+    byId.remove(localIdentity.deviceId);
     devices = byId.values.toList(growable: false);
   }
 
   // --- discovery ------------------------------------------------------------
 
   void startDiscovery() {
+    // Hold the Wi-Fi multicast lock for the duration of discovery (T-X20):
+    // without it most devices filter the inbound mDNS multicast and browsing
+    // silently finds nothing. No-op off Android.
+    unawaited(_mdns.acquireMulticastLock());
     sweep();
     _discoveryTimer?.cancel();
     _discoveryTimer =
@@ -269,6 +305,9 @@ class DeviceListModel extends ChangeNotifier {
   void stopDiscovery() {
     _discoveryTimer?.cancel();
     _discoveryTimer = null;
+    // Drop the multicast lock while not discovering (T-X20) so it is not held
+    // needlessly (battery); reacquired on the next startDiscovery.
+    unawaited(_mdns.releaseMulticastLock());
     unawaited(
       _mdns.stopAdvertising().catchError(
           (Object e) => debugPrint('mdns stop advertise failed: $e')),
@@ -311,7 +350,16 @@ class DeviceListModel extends ChangeNotifier {
   /// [PairingModel.refreshDevices].
   Future<void> refresh() => sweep();
 
+  /// Runs on a 5-second timer while discovery is active. Most sweeps
+  /// rediscover exactly the same peers, so this only calls
+  /// [notifyListeners] when the visible set or the error state actually
+  /// changed -- otherwise every tick would force a full Home-screen
+  /// rebuild (every row, the status line, quick actions) for no visual
+  /// change, which is exactly the kind of periodic jank that makes the
+  /// UI feel less smooth than it should.
   Future<void> sweep() async {
+    final previousNearby = nearby;
+    final previousError = lastDiscoveryError;
     try {
       final result = await _mdns.discover();
       if (result.isError) {
@@ -322,12 +370,30 @@ class DeviceListModel extends ChangeNotifier {
             .where((d) => d.deviceId != localIdentity.deviceId)
             .toList(growable: false);
       }
-      notifyListeners();
     } catch (e) {
       lastDiscoveryError = 'mDNS sweep failed: $e';
       debugPrint('mdns sweep failed: $e');
+    }
+    if (lastDiscoveryError != previousError ||
+        !_sameNearby(previousNearby, nearby)) {
       notifyListeners();
     }
+  }
+
+  static bool _sameNearby(List<NearbyDevice> a, List<NearbyDevice> b) {
+    if (a.length != b.length) return false;
+    final byId = {for (final d in a) d.deviceId: d};
+    for (final d in b) {
+      final prev = byId[d.deviceId];
+      if (prev == null ||
+          prev.deviceName != d.deviceName ||
+          prev.platform != d.platform ||
+          prev.host != d.host ||
+          prev.port != d.port) {
+        return false;
+      }
+    }
+    return true;
   }
 
   static String _uuidV4() {

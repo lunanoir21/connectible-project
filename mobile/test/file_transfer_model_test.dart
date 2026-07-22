@@ -1,18 +1,26 @@
 @Timeout(Duration(seconds: 30))
 library;
 
-import 'dart:convert';
 import 'dart:io';
 
 import 'package:crypto/crypto.dart';
 import 'package:fixnum/fixnum.dart';
 import 'package:connectible_mobile/src/generated/connectible.pbgrpc.dart'
     as pb;
-import 'package:connectible_mobile/src/services/crc32.dart';
+import 'package:connectible_mobile/src/models/models.dart';
 import 'package:connectible_mobile/src/state/file_transfer_model.dart';
 import 'package:connectible_mobile/src/state/sync_connection.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:path_provider_platform_interface/path_provider_platform_interface.dart';
+import 'package:shared_preferences/shared_preferences.dart';
+
+/// Fresh, empty-backed prefs instance per call (Phase J): FileTransferModel
+/// now persists its transfer history through shared_preferences the same
+/// way DeviceListModel persists its paired-device roster.
+Future<SharedPreferences> _testPrefs() async {
+  SharedPreferences.setMockInitialValues({});
+  return SharedPreferences.getInstance();
+}
 
 /// Minimal [SyncConnection] test double (T-905): records every frame
 /// [FileTransferModel] pushes outbound instead of needing a real network
@@ -40,16 +48,6 @@ class _FakeConnection implements SyncConnection {
 
   @override
   void sendFrame(pb.SyncFrame frame) => sent.add(frame);
-
-  List<pb.FileChunk> get chunksSent =>
-      sent.where((f) => f.whichPayload() == pb.SyncFrame_Payload.fileChunk)
-          .map((f) => f.fileChunk)
-          .toList();
-
-  List<pb.FileChunkRequest> get chunkRequestsSent => sent
-      .where((f) => f.whichPayload() == pb.SyncFrame_Payload.fileChunkRequest)
-      .map((f) => f.fileChunkRequest)
-      .toList();
 }
 
 /// Fakes `path_provider`'s application-documents directory (T-905/T-908):
@@ -97,7 +95,8 @@ void main() {
       // The upload path needs the active peer's ConnectibleClient; with
       // none (responder-only / not connected), sendFile does nothing.
       final connection = _FakeConnection()..uploadClientOverride = null;
-      final model = FileTransferModel(connection: connection);
+      final model =
+          FileTransferModel(connection: connection, prefs: await _testPrefs());
       addTearDown(model.dispose);
 
       final file = await writeSourceFile('idle.bin', 10);
@@ -145,7 +144,8 @@ void main() {
     }
 
     test('a prepared + streamed upload lands verified on disk', () async {
-      final model = FileTransferModel(connection: _FakeConnection());
+      final model = FileTransferModel(
+          connection: _FakeConnection(), prefs: await _testPrefs());
       addTearDown(model.dispose);
 
       final bytes = List<int>.generate(150000, (i) => (i * 31) % 251);
@@ -167,7 +167,8 @@ void main() {
 
     test('a dropped stream keeps a partial that a second upload resumes',
         () async {
-      final model = FileTransferModel(connection: _FakeConnection());
+      final model = FileTransferModel(
+          connection: _FakeConnection(), prefs: await _testPrefs());
       addTearDown(model.dispose);
 
       final bytes = List<int>.generate(150000, (i) => (i * 17) % 251);
@@ -194,7 +195,8 @@ void main() {
     });
 
     test('a wrong declared hash fails without finalizing', () async {
-      final model = FileTransferModel(connection: _FakeConnection());
+      final model = FileTransferModel(
+          connection: _FakeConnection(), prefs: await _testPrefs());
       addTearDown(model.dispose);
 
       final bytes = List<int>.generate(50000, (i) => i % 250);
@@ -211,233 +213,155 @@ void main() {
     });
   });
 
-  group('FileTransferModel - incoming receive (T-905)', () {
-    test('handleFileChunk for an unregistered transfer id is ignored',
-        () async {
-      final connection = _FakeConnection();
-      final model = FileTransferModel(connection: connection);
-      addTearDown(model.dispose);
-
-      model.handleFileChunk(pb.FileChunk(
-        transferId: 'never-started',
-        offsetBytes: Int64(0),
-        data: [1, 2, 3],
-        isLast: true,
-        chunkChecksum: Crc32.compute([1, 2, 3]),
+  group('FileTransferModel - persisted history (Phase J)', () {
+    Future<pb.PrepareUploadResponse> prepare(
+        FileTransferModel model, String fileId, String name, List<int> bytes,
+        {String? hash}) {
+      return model.handlePrepareUpload(pb.PrepareUploadRequest(
+        sender: pb.Identity(deviceId: 'peer-1'),
+        sessionId: 'sess-$fileId',
+        files: [
+          pb.UploadFileMeta(
+            fileId: fileId,
+            fileName: name,
+            fileSizeBytes: Int64(bytes.length),
+            fileHash: hash ?? sha256.convert(bytes).toString(),
+            mimeType: 'application/octet-stream',
+          ),
+        ],
       ));
-      await pumpEventQueue();
-      await model.pendingIoForTests;
+    }
 
-      expect(model.transfers, isEmpty);
-    });
-
-    test('a single correct chunk completes and hash-verifies', () async {
-      final connection = _FakeConnection();
-      final model = FileTransferModel(connection: connection);
-      addTearDown(model.dispose);
-
-      final content = utf8.encode('incoming payload');
-      const transferId = 'incoming-ok-1';
-      model.handleFileTransferStart(pb.FileTransferStart(
-        transferId: transferId,
-        fileName: 'note.txt',
-        fileSizeBytes: Int64(content.length),
-        fileHash: sha256.convert(content).toString(),
-        chunkSizeBytes: content.length,
-        resumeOffsetBytes: Int64(0),
-      ));
-      await pumpEventQueue();
-      await model.pendingIoForTests;
-
-      model.handleFileChunk(pb.FileChunk(
-        transferId: transferId,
-        offsetBytes: Int64(0),
-        data: content,
-        isLast: true,
-        chunkChecksum: Crc32.compute(content),
-      ));
-      await pumpEventQueue();
-      await model.pendingIoForTests;
-
-      expect(model.transfers[transferId]!.completed, isTrue);
-      expect(model.transfers[transferId]!.failed, isFalse);
-      expect(model.transfers[transferId]!.bytesTransferred, content.length);
-      // The finalized file's path is remembered so the UI's "Save to..."
-      // action can copy it out of the app-private received/ dir, and it
-      // actually exists on disk with the received bytes.
-      final savedPath = model.incomingFilePath(transferId);
-      expect(savedPath, isNotNull);
-      expect(File(savedPath!).existsSync(), isTrue);
-      expect(File(savedPath).readAsBytesSync(), content);
-    });
-
-    test('a whole-file hash mismatch fails the transfer instead of '
-        'completing it', () async {
-      final connection = _FakeConnection();
-      final model = FileTransferModel(connection: connection);
-      addTearDown(model.dispose);
-
-      final content = utf8.encode('this content does not match the hash');
-      const transferId = 'incoming-bad-hash';
-      model.handleFileTransferStart(pb.FileTransferStart(
-        transferId: transferId,
-        fileName: 'note2.txt',
-        fileSizeBytes: Int64(content.length),
-        // Deliberately wrong whole-file hash, even though every
-        // individual chunk's CRC32 will check out below.
-        fileHash: sha256.convert(utf8.encode('something else entirely')).toString(),
-        chunkSizeBytes: content.length,
-        resumeOffsetBytes: Int64(0),
-      ));
-      await pumpEventQueue();
-      await model.pendingIoForTests;
-
-      model.handleFileChunk(pb.FileChunk(
-        transferId: transferId,
-        offsetBytes: Int64(0),
-        data: content,
-        isLast: true,
-        chunkChecksum: Crc32.compute(content),
-      ));
-      await pumpEventQueue();
-      await model.pendingIoForTests;
-
-      expect(model.transfers[transferId]!.failed, isTrue);
-      expect(model.transfers[transferId]!.completed, isFalse);
-    });
-  });
-
-  // --- T-908: mobile-side fault injection, mirroring the daemon's
-  // corrupted_chunk_triggers_resend_and_transfer_completes (grpc_smoke.rs)
-  // -------------------------------------------------------------------
-
-  group('FileTransferModel - chunk-corruption fault injection (T-908)', () {
-    test(
-        'a corrupted incoming chunk triggers exactly one FileChunkRequest, '
-        'and the transfer completes with the correct hash once the '
-        'resend arrives', () async {
-      final connection = _FakeConnection();
-      final model = FileTransferModel(connection: connection);
-      addTearDown(model.dispose);
-
-      // Two-chunk file, same shape as the daemon fixture: a first chunk
-      // that gets corrupted in transit and a second (last) chunk that
-      // arrives untouched.
-      final chunk0 = List<int>.generate(40000, (i) => (i * 31) % 251);
-      final chunk1 = List<int>.generate(20000, (i) => ((i + 7) * 53) % 251);
-      final whole = [...chunk0, ...chunk1];
-      const transferId = 'fault-injection-1';
-
-      model.handleFileTransferStart(pb.FileTransferStart(
-        transferId: transferId,
-        fileName: 'payload.bin',
-        fileSizeBytes: Int64(whole.length),
-        fileHash: sha256.convert(whole).toString(),
-        chunkSizeBytes: chunk0.length,
-        resumeOffsetBytes: Int64(0),
-      ));
-      await pumpEventQueue();
-      await model.pendingIoForTests;
-
-      // Chunk 0 arrives with one bit flipped -- the checksum was computed
-      // honestly over the *correct* bytes by the sender, so this chunk's
-      // CRC32 will not match what actually arrived (mirrors the daemon
-      // test's proxy that XORs the first byte after the checksum is
-      // already computed).
-      final corruptedChunk0 = List<int>.from(chunk0);
-      corruptedChunk0[0] ^= 0xFF;
-      model.handleFileChunk(pb.FileChunk(
-        transferId: transferId,
-        offsetBytes: Int64(0),
-        data: corruptedChunk0,
-        isLast: false,
-        chunkChecksum: Crc32.compute(chunk0),
-      ));
-      await pumpEventQueue();
-      await model.pendingIoForTests;
-
-      expect(connection.chunkRequestsSent, hasLength(1));
-      expect(connection.chunkRequestsSent.single.transferId, transferId);
-      expect(connection.chunkRequestsSent.single.offsetBytes.toInt(), 0);
-      // Not yet complete or failed: still waiting on the resend.
-      expect(model.transfers[transferId]!.completed, isFalse);
-      expect(model.transfers[transferId]!.failed, isFalse);
-
-      // The last chunk arrives correctly while offset 0 is still pending
-      // -- must not finalize prematurely with the corrupt bytes still
-      // outstanding.
-      model.handleFileChunk(pb.FileChunk(
-        transferId: transferId,
-        offsetBytes: Int64(chunk0.length),
-        data: chunk1,
-        isLast: true,
-        chunkChecksum: Crc32.compute(chunk1),
-      ));
-      await pumpEventQueue();
-      await model.pendingIoForTests;
-
-      expect(model.transfers[transferId]!.completed, isFalse);
-      expect(model.transfers[transferId]!.failed, isFalse);
-
-      // Sender resends offset 0 with the correct bytes this time.
-      model.handleFileChunk(pb.FileChunk(
-        transferId: transferId,
-        offsetBytes: Int64(0),
-        data: chunk0,
-        isLast: false,
-        chunkChecksum: Crc32.compute(chunk0),
-      ));
-      await pumpEventQueue();
-      await model.pendingIoForTests;
-
-      // Still exactly one resend request was ever needed.
-      expect(connection.chunkRequestsSent, hasLength(1));
-      expect(model.transfers[transferId]!.completed, isTrue);
-      expect(model.transfers[transferId]!.failed, isFalse);
-      expect(model.transfers[transferId]!.bytesTransferred, whole.length);
-    });
-
-    test(
-        'the same offset repeatedly failing CRC32 beyond the resend limit '
-        'fails the whole transfer instead of looping forever', () async {
-      final connection = _FakeConnection();
-      final model = FileTransferModel(connection: connection);
-      addTearDown(model.dispose);
-
-      final content = List<int>.generate(1000, (i) => i % 200);
-      const transferId = 'fault-injection-give-up';
-      model.handleFileTransferStart(pb.FileTransferStart(
-        transferId: transferId,
-        fileName: 'never-fixed.bin',
-        fileSizeBytes: Int64(content.length),
-        fileHash: sha256.convert(content).toString(),
-        chunkSizeBytes: content.length,
-        resumeOffsetBytes: Int64(0),
-      ));
-      await pumpEventQueue();
-      await model.pendingIoForTests;
-
-      // Every attempt at offset 0 is corrupted -- the checksum is
-      // deliberately wrong every single time, simulating a systematically
-      // broken link rather than a one-off bit flip.
-      final badChecksum = Crc32.compute(content) ^ 0xFFFFFFFF;
-      for (var i = 0; i < 4; i++) {
-        model.handleFileChunk(pb.FileChunk(
-          transferId: transferId,
+    Stream<pb.UploadFilePart> uploadStream(
+        String session, String fileId, String token, List<int> bytes) async* {
+      yield pb.UploadFilePart(
+        header: pb.UploadFileHeader(
+          sessionId: session,
+          fileId: fileId,
+          token: token,
           offsetBytes: Int64(0),
-          data: content,
-          isLast: true,
-          chunkChecksum: badChecksum,
-        ));
-        await pumpEventQueue();
-      await model.pendingIoForTests;
+        ),
+      );
+      for (var i = 0; i < bytes.length; i += 64 * 1024) {
+        final end =
+            (i + 64 * 1024) > bytes.length ? bytes.length : (i + 64 * 1024);
+        yield pb.UploadFilePart(chunk: bytes.sublist(i, end));
       }
+    }
 
-      expect(model.transfers[transferId]!.failed, isTrue);
-      expect(model.transfers[transferId]!.completed, isFalse);
-      // Bounded, not unbounded: at most a few resend requests were made,
-      // not one per corrupted attempt forever.
-      expect(connection.chunkRequestsSent.length, lessThanOrEqualTo(3));
+    test(
+        'a completed incoming transfer survives an app restart '
+        '(model reconstruction against the same prefs)', () async {
+      final prefs = await _testPrefs();
+      final model =
+          FileTransferModel(connection: _FakeConnection(), prefs: prefs);
+      addTearDown(model.dispose);
+
+      final bytes = List<int>.generate(20000, (i) => (i * 7) % 251);
+      const fileId = 'hist-restart';
+      final prep = await prepare(model, fileId, 'keeper.bin', bytes);
+      final result = await model.handleUploadFile(
+          uploadStream(prep.sessionId, fileId, prep.offers.single.token, bytes));
+      expect(result.completed, isTrue);
+
+      expect(model.history, hasLength(1));
+      expect(model.history.single.transferId, fileId);
+      expect(model.history.single.status, 'completed');
+      expect(model.history.single.direction, TransferDirection.incoming);
+      expect(model.history.single.fileName, 'keeper.bin');
+      expect(model.history.single.totalBytes, bytes.length);
+
+      // "Restart": a brand-new model against the same prefs instance has
+      // an empty in-memory transfers map but the persisted history entry.
+      final restarted =
+          FileTransferModel(connection: _FakeConnection(), prefs: prefs);
+      addTearDown(restarted.dispose);
+      expect(restarted.transfers, isEmpty);
+      expect(restarted.history, hasLength(1));
+      expect(restarted.history.single.transferId, fileId);
+      expect(restarted.history.single.status, 'completed');
+    });
+
+    test('a hash-mismatched incoming transfer is recorded as failed',
+        () async {
+      final prefs = await _testPrefs();
+      final model =
+          FileTransferModel(connection: _FakeConnection(), prefs: prefs);
+      addTearDown(model.dispose);
+
+      final bytes = List<int>.generate(10000, (i) => i % 250);
+      const fileId = 'hist-badhash';
+      final prep =
+          await prepare(model, fileId, 'bad.bin', bytes, hash: 'deadbeef');
+      final result = await model.handleUploadFile(
+          uploadStream(prep.sessionId, fileId, prep.offers.single.token, bytes));
+      expect(result.completed, isFalse);
+
+      expect(model.history, hasLength(1));
+      expect(model.history.single.status, 'failed');
+      expect(model.history.single.direction, TransferDirection.incoming);
+    });
+
+    test('a corrupted stored history blob falls back to empty, not a crash',
+        () async {
+      SharedPreferences.setMockInitialValues(
+          {'connectible.transfer_history': 'not json at all {'});
+      final prefs = await SharedPreferences.getInstance();
+      final model =
+          FileTransferModel(connection: _FakeConnection(), prefs: prefs);
+      addTearDown(model.dispose);
+      expect(model.history, isEmpty);
+    });
+
+    test(
+        'incomingFilePath survives an app restart via the persisted '
+        'localPath (T-X5)', () async {
+      final prefs = await _testPrefs();
+      final model =
+          FileTransferModel(connection: _FakeConnection(), prefs: prefs);
+      addTearDown(model.dispose);
+
+      final bytes = List<int>.generate(20000, (i) => (i * 13) % 251);
+      const fileId = 'hist-savepath';
+      final prep = await prepare(model, fileId, 'kept.bin', bytes);
+      final result = await model.handleUploadFile(uploadStream(
+          prep.sessionId, fileId, prep.offers.single.token, bytes));
+      expect(result.completed, isTrue);
+      final livePath = model.incomingFilePath(fileId);
+      expect(livePath, isNotNull);
+
+      // "Restart": the in-memory path map is gone, but the persisted
+      // history entry still resolves the same on-disk file.
+      final restarted =
+          FileTransferModel(connection: _FakeConnection(), prefs: prefs);
+      addTearDown(restarted.dispose);
+      expect(restarted.incomingFilePath(fileId), livePath);
+      expect(File(restarted.incomingFilePath(fileId)!).existsSync(), isTrue);
+    });
+
+    test(
+        'a pre-T-X5 history blob without localPath loads, and the entry '
+        'simply has no saved path (backward compatibility)', () async {
+      SharedPreferences.setMockInitialValues({
+        'connectible.transfer_history':
+            '[{"transferId":"legacy-1","peerDeviceId":"peer-1",'
+                '"fileName":"old.bin","totalBytes":10,'
+                '"direction":"incoming","status":"completed",'
+                '"startedAtMs":1,"finishedAtMs":2}]',
+      });
+      final prefs = await SharedPreferences.getInstance();
+      final model =
+          FileTransferModel(connection: _FakeConnection(), prefs: prefs);
+      addTearDown(model.dispose);
+      expect(model.history.single.localPath, isEmpty);
+      expect(model.incomingFilePath('legacy-1'), isNull);
     });
   });
+
+  // The legacy chunk-over-SyncStream receive path (T-905's
+  // handleFileTransferStart/handleFileChunk and T-908's
+  // chunk-corruption/resend fault injection) was removed in Phase I
+  // along with the production code it tested -- every transfer now
+  // runs over the dedicated PrepareUpload/UploadFile RPCs, covered by
+  // the groups above.
 }

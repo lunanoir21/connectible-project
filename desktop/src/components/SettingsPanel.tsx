@@ -12,19 +12,44 @@ interface SettingsPanelProps {
   onThemeChange: (theme: ThemeId) => void;
   deviceName: string;
   appVersion: string;
+  onOpenPairingQr: () => void;
+  // T-310's clipboard-sync toggle, previously reachable only from the
+  // system tray menu (src-tauri/src/tray.rs). Sourced from the shared
+  // daemon state (App.tsx's `daemon.clipboardSyncEnabled`) the same way
+  // RemoteInputPanel's `enabled` prop mirrors `daemon.remoteInputEnabled`.
+  clipboardSyncEnabled: boolean;
+  // Re-fetches daemon state after a successful toggle, mirroring
+  // RemoteInputPanel's onRefresh -- the toggle itself calls
+  // ipc.setClipboardSyncEnabled directly (matching how every other
+  // action in this panel calls ipc.* directly rather than going through
+  // a callback prop).
+  onClipboardSyncRefresh: () => void;
 }
 
 /// Settings panel (T-034 area): spacious, sectioned surface for
 /// appearance (theme), language, connection, and read-only about info.
-export function SettingsPanel({ theme, onThemeChange, deviceName, appVersion }: SettingsPanelProps) {
+export function SettingsPanel({
+  theme,
+  onThemeChange,
+  deviceName,
+  appVersion,
+  onOpenPairingQr,
+  clipboardSyncEnabled,
+  onClipboardSyncRefresh,
+}: SettingsPanelProps) {
   const { t, locale, setLocale } = useI18n();
   const [daemonStatus, setDaemonStatus] = useState<DaemonStatusDto | null>(null);
   const [checking, setChecking] = useState(false);
+  const [togglingClipboardSync, setTogglingClipboardSync] = useState(false);
   // Distinct from `daemonStatus.error` (which reflects the daemon's own
   // reported state): this is for a start/stop *command itself* failing
   // to reach the Tauri backend at all (RULES.md "never swallow an
   // error silently").
   const [actionError, setActionError] = useState<string | null>(null);
+  // T-X11: a neutral (non-error) notice, e.g. "the daemon is managed
+  // externally, stop it with systemctl" when Stop had nothing of its
+  // own to kill. Distinct from `actionError` so it renders calmly.
+  const [actionNotice, setActionNotice] = useState<string | null>(null);
   // Where the daemon saves received files (T-108 follow-up): resolved
   // effective folder, plus a picker to change it. null until the first
   // fetch resolves.
@@ -69,6 +94,26 @@ export function SettingsPanel({ theme, onThemeChange, deviceName, appVersion }: 
     setChecking(false);
   }, [t]);
 
+  // Fetch the daemon's status as soon as the panel mounts, instead of
+  // leaving it on "Checking..." until the user notices and clicks
+  // Refresh themselves.
+  useEffect(() => {
+    void checkDaemonStatus();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const toggleClipboardSync = useCallback(async () => {
+    setTogglingClipboardSync(true);
+    setActionError(null);
+    const result = await ipc.setClipboardSyncEnabled(!clipboardSyncEnabled);
+    setTogglingClipboardSync(false);
+    if (!result.ok) {
+      setActionError(errorCodeMessage(result.error.code, t));
+      return;
+    }
+    onClipboardSyncRefresh();
+  }, [clipboardSyncEnabled, onClipboardSyncRefresh, t]);
+
   const startDaemon = useCallback(async () => {
     setChecking(true);
     setActionError(null);
@@ -84,11 +129,19 @@ export function SettingsPanel({ theme, onThemeChange, deviceName, appVersion }: 
   const stopDaemon = useCallback(async () => {
     setChecking(true);
     setActionError(null);
+    setActionNotice(null);
     const stopResult = await ipc.stopDaemon();
     if (!stopResult.ok) {
       setActionError(errorCodeMessage(stopResult.error.code, t));
       setChecking(false);
       return;
+    }
+    // T-X11: `stop_daemon` returns false when this app did not spawn the
+    // running daemon (e.g. a systemd user service) and so has no process
+    // to kill. That is not an error, but silently doing nothing looks
+    // broken -- tell the user where the real off switch is.
+    if (!stopResult.value) {
+      setActionNotice(t("settings.daemonExternal"));
     }
     // Re-check status
     const statusResult = await ipc.daemonStatus();
@@ -129,16 +182,9 @@ export function SettingsPanel({ theme, onThemeChange, deviceName, appVersion }: 
                   <span className="h-11 flex-1 rounded" style={{ background: option.swatch[2] }} />
                   <span className="h-5 w-2.5 rounded-full bg-paper" />
                 </div>
-                <div className="flex items-center justify-between">
-                  <span className={`text-sm font-medium ${active ? "text-ink" : "text-ink-muted"}`}>
-                    {t(option.nameKey)}
-                  </span>
-                  {active && (
-                    <span className="flex h-4 w-4 items-center justify-center rounded-full bg-paper">
-                      <Icon name="check" className="h-3 w-3 text-black" strokeWidth={2.4} />
-                    </span>
-                  )}
-                </div>
+                <span className={`text-sm font-medium ${active ? "text-ink" : "text-ink-muted"}`}>
+                  {t(option.nameKey)}
+                </span>
               </button>
             );
           })}
@@ -192,15 +238,21 @@ export function SettingsPanel({ theme, onThemeChange, deviceName, appVersion }: 
                 <>
                   <span
                     className={`flex h-2 w-2 rounded-full ${
-                      daemonStatus.running ? "bg-paper" : "bg-danger"
+                      !daemonStatus.running ? "bg-ink-ghost" : daemonStatus.reachable ? "bg-paper" : "bg-danger"
                     }`}
                   />
                   <span className="text-sm text-ink-muted">
-                    {daemonStatus.running ? t("daemon.running") : t("daemon.stopped")}
-                    {daemonStatus.reachable && " · " + t("daemon.reachable")}
-                    {!daemonStatus.reachable && daemonStatus.running && " · " + t("daemon.unreachable")}
-                    {daemonStatus.rttMs && " · " + t("daemon.rtt", { ms: daemonStatus.rttMs })}
+                    {!daemonStatus.running
+                      ? t("daemon.stopped")
+                      : daemonStatus.reachable
+                        ? t("daemon.reachable")
+                        : t("daemon.unreachable")}
                   </span>
+                  {daemonStatus.running && daemonStatus.reachable && daemonStatus.rttMs && (
+                    <span className="text-xs text-ink-faint nums">
+                      {t("daemon.rtt", { ms: daemonStatus.rttMs })}
+                    </span>
+                  )}
                 </>
               )}
               {!daemonStatus && <span className="text-sm text-ink-faint">{t("daemon.checking")}</span>}
@@ -214,6 +266,11 @@ export function SettingsPanel({ theme, onThemeChange, deviceName, appVersion }: 
           {actionError && (
             <p className="rounded-lg border border-danger/30 bg-danger-soft px-3.5 py-2.5 text-sm text-danger" role="alert">
               {actionError}
+            </p>
+          )}
+          {actionNotice && (
+            <p className="rounded-lg border border-line bg-surface-overlay px-3.5 py-2.5 text-sm text-ink-muted" role="status">
+              {actionNotice}
             </p>
           )}
           <div className="flex flex-wrap gap-2">
@@ -236,6 +293,42 @@ export function SettingsPanel({ theme, onThemeChange, deviceName, appVersion }: 
             )}
           </div>
         </div>
+      </SettingsSection>
+
+      {/* Clipboard sync */}
+      <SettingsSection icon="clipboard" title={t("settings.clipboardSync")} hint={t("settings.clipboardSyncHint")}>
+        <div className="flex items-center justify-between rounded-lg border border-line bg-black/20 px-3.5 py-3">
+          <div>
+            <p className="text-sm font-medium text-ink">
+              {clipboardSyncEnabled ? t("settings.clipboardSyncEnabledTitle") : t("settings.clipboardSyncDisabledTitle")}
+            </p>
+            <p className="mt-0.5 text-xs text-ink-faint">{t("settings.clipboardSyncToggleHint")}</p>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={clipboardSyncEnabled}
+            aria-label={t("settings.clipboardSyncToggleLabel")}
+            disabled={togglingClipboardSync}
+            onClick={() => void toggleClipboardSync()}
+            className={`relative h-6 w-11 shrink-0 rounded-full border transition-colors disabled:opacity-50 ${
+              clipboardSyncEnabled ? "border-white/25 bg-white/20" : "border-line bg-surface-overlay"
+            }`}
+          >
+            <span
+              className={`absolute top-0.5 h-4 w-4 rounded-full bg-paper transition-transform ${
+                clipboardSyncEnabled ? "translate-x-[22px]" : "translate-x-0.5"
+              }`}
+            />
+          </button>
+        </div>
+      </SettingsSection>
+
+      {/* Pairing QR */}
+      <SettingsSection icon="devices" title={t("settings.pairingQr")} hint={t("settings.pairingQrHint")}>
+        <button type="button" onClick={onOpenPairingQr} className="btn-primary text-sm">
+          {t("settings.pairingQrOpen")}
+        </button>
       </SettingsSection>
 
       {/* Received files */}
@@ -282,7 +375,7 @@ function SettingsSection({
   hint,
   children,
 }: {
-  icon: "palette" | "globe" | "shield" | "cpu" | "desktop" | "arrow-down";
+  icon: "palette" | "globe" | "shield" | "cpu" | "desktop" | "arrow-down" | "devices" | "clipboard";
   title: string;
   hint?: string;
   children: React.ReactNode;
