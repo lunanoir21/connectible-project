@@ -59,6 +59,16 @@ class PairingManager {
   /// can't keep re-popping this phone's PIN dialog.
   static const Duration pairCooldown = Duration(seconds: 5);
 
+  /// T-X22: caps the number of *distinct* requester device_ids this
+  /// manager will track bookkeeping for at once, mirroring the daemon's
+  /// own `MAX_TRACKED_DEVICES` (daemon/src/pairing/mod.rs). Without this,
+  /// a flood of Pair calls each using a fresh, never-reused device_id
+  /// bypasses [pairCooldown] (which only throttles *repeated* use of the
+  /// *same* id) and grows `_pending`/`_lastCreatedMs` without bound. An
+  /// already-tracked device_id is never blocked by this -- only a
+  /// brand-new one past the cap is.
+  static const int maxTrackedDevices = 256;
+
   final Random _random;
   final int Function() _now;
   final Map<String, _PendingPin> _pending = {};
@@ -91,6 +101,12 @@ class PairingManager {
     if (lastMs != null && now - lastMs < pairCooldown.inMilliseconds) {
       throw RateLimitedException(
           'pairing requests from $requesterDeviceId are throttled');
+    } else if (lastMs == null && _lastCreatedMs.length >= maxTrackedDevices) {
+      // T-X22: a brand-new device_id past the cap, mirroring the
+      // daemon's identical guard -- an already-tracked id (the branch
+      // above) is never blocked by this.
+      throw const RateLimitedException(
+          'too many distinct devices are mid-pairing right now');
     }
     _lastCreatedMs[requesterDeviceId] = now;
 

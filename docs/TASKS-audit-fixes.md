@@ -598,7 +598,30 @@ fingerprint-changed case using its own clear i18n string.
 *Acceptance:* widget test — a failing connect surfaces the message;
 fingerprint-change path shows the dedicated string.
 
-### T-X20: Acquire an Android multicast lock while discovering `[ ]`
+### T-X20: Acquire an Android multicast lock while discovering `[x]`
+**Done** (implementation by the X4 sub-agent before it hit a session
+limit mid-task; finished + tested by the main session). New
+`MulticastLockPlugin.kt` (channel `connectible/multicast`, idempotent
+non-reference-counted `WifiManager.MulticastLock`, registered in
+`MainActivity`); `MdnsService` gained `acquire/releaseMulticastLock()`
+(idempotent via a `_multicastLockHeld` flag, no-op off Android or when
+the native side is absent, swallows failures so a lock error never
+breaks discovery); `DeviceListModel.startDiscovery` acquires and
+`stopDiscovery` releases (and `MdnsService.dispose` releases on
+teardown). New `test/services/mdns_multicast_lock_test.dart`: mocked
+channel, verifies one native acquire/release each with idempotence, a
+release-without-acquire no-op, and that a native acquire failure is
+swallowed. `flutter analyze` clean. **On-device verification flagged
+for the owner**: the real `WifiManager` lock (and whether it fixes
+field discovery) can only be confirmed on a physical Android device --
+no emulator in this sandbox.
+*Files:* `mobile/android/.../net/MulticastLockPlugin.kt` (new),
+`mobile/android/.../MainActivity.kt`,
+`mobile/lib/src/services/mdns_service.dart`,
+`mobile/lib/src/state/device_list_model.dart`,
+`mobile/test/services/mdns_multicast_lock_test.dart` (new).
+
+<details><summary>original</summary>
 The manifest declares `CHANGE_WIFI_MULTICAST_STATE` and even comments
 that discovery needs a multicast lock (`AndroidManifest.xml:5-7`), but
 nothing in the repo acquires one (`multicast_dns` is pure Dart and
@@ -612,8 +635,31 @@ new plugin file), `mobile/lib/src/services/mdns_service.dart`.
 *Acceptance:* `flutter analyze` clean; Dart side unit-tested with a
 mocked channel; real-device verification explicitly flagged for the
 owner in the Done note (no phone in this sandbox).
+</details>
 
-### T-X21: Pause mDNS sweeps while the app is backgrounded `[ ]`
+### T-X21: Pause mDNS sweeps while the app is backgrounded `[x]`
+**Done.** `DeviceListModel` now mixes in `WidgetsBindingObserver`
+(registered in the constructor, removed in `dispose`), mirroring
+`ClipboardModel`'s own lifecycle-pause pattern. New `_discoveryActive`
+flag tracks "discovery has been started and not yet explicitly
+stopped" independent of the timer itself, so `didChangeAppLifecycleState`
+is a no-op unless discovery is actually active (a background/
+foreground transition before pairing, or on a screen that never called
+`startDiscovery`, must not spin it up). On non-`resumed` states: cancel
+the sweep timer and release T-X20's multicast lock. On `resumed`:
+reacquire the lock, restart the timer, and sweep immediately (catch-up
+for whatever appeared while backgrounded). New `@visibleForTesting bool
+get isSweepTimerActiveForTest` (mirrors `ClipboardEchoGuard`'s existing
+test-seam pattern — `Timer` exposes no queryable "is this the current
+generation" state from outside). 3 new tests: pause stops the timer +
+resume restarts it; a lifecycle change before `startDiscovery` is a
+no-op; a lifecycle change after an explicit `stopDiscovery` is also a
+no-op (doesn't resurrect a deliberately-stopped discovery). All 9
+`device_list_model_test.dart` tests green; `flutter analyze` clean.
+*Files:* `mobile/lib/src/state/device_list_model.dart`,
+`mobile/test/device_list_model_test.dart`.
+
+<details><summary>original</summary>
 `startDiscovery` runs a 4s multicast sweep every 5s
 (`device_list_model.dart:255-267`) and only stops on `dispose`
 (`:372-377`). `ClipboardModel` already has the lifecycle-pause pattern
@@ -623,8 +669,26 @@ sweeps (and release T-X20's lock) in background, resume on foreground.
 lifecycle observer is wired).
 *Acceptance:* test — simulated lifecycle pause stops the timer,
 resume restarts it.
+</details>
 
-### T-X22: Cap distinct pending device_ids in mobile PairingManager `[ ]`
+### T-X22: Cap distinct pending device_ids in mobile PairingManager `[x]`
+**Done.** New `PairingManager.maxTrackedDevices = 256` (mirrors the
+daemon's `MAX_TRACKED_DEVICES` exactly, same value and same doc
+reasoning). `createPending`'s cooldown check gained an `else if`
+branch: a brand-new device_id (`lastMs == null`) past the cap throws
+`RateLimitedException('too many distinct devices are mid-pairing right
+now')` -- the exact daemon message, for consistency. An already-tracked
+id is never blocked (unchanged branch above handles it). New test
+"distinct device flood is capped, but already-tracked devices still
+work (T-X22)" ported directly from the daemon's
+`distinct_device_flood_is_capped_but_known_devices_still_work`: floods
+`maxTrackedDevices` distinct ids (all succeed), one more distinct id is
+rejected, but the first flooded id (still tracked) succeeds again.
+11/11 `pairing_manager_test.dart` tests green; `flutter analyze` clean.
+*Files:* `mobile/lib/src/services/pairing_manager.dart`,
+`mobile/test/pairing_manager_test.dart`.
+
+<details><summary>original</summary>
 `_pending`/`_lastCreatedMs` grow unbounded and cooldown is per-device
 (`services/pairing_manager.dart:64-65, 91-95`) — a LAN peer minting a
 fresh fake device_id per request can bloat the maps and keep the
@@ -634,6 +698,7 @@ pruning behavior.
 *Files:* `mobile/lib/src/services/pairing_manager.dart`, its test.
 *Acceptance:* test — flooding N+1 distinct ids keeps memory bounded
 and known devices still pairable (mirror the daemon's test).
+</details>
 
 ### T-X23: `handleUploadFile` cleans up on stream error; tickets capped `[ ]`
 No try/finally around the `await for` (`file_transfer_model.dart:

@@ -3,7 +3,10 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
-import 'package:flutter/foundation.dart';
+import 'package:flutter/foundation.dart'
+    show ChangeNotifier, debugPrint, visibleForTesting;
+import 'package:flutter/widgets.dart'
+    show AppLifecycleState, WidgetsBinding, WidgetsBindingObserver;
 import 'package:shared_preferences/shared_preferences.dart';
 
 import '../models/models.dart';
@@ -19,12 +22,13 @@ import '../generated/connectible.pbgrpc.dart' as pb;
 /// Deliberately has no notion of an active connection -- [PairingModel]
 /// owns that and depends on this model (one-directional) to read/update
 /// identity and the paired roster.
-class DeviceListModel extends ChangeNotifier {
+class DeviceListModel extends ChangeNotifier with WidgetsBindingObserver {
   DeviceListModel(this._prefs,
       {required String deviceName, bool pairableEnabled = true})
       : _pairableEnabled = pairableEnabled {
     _initIdentity(deviceName);
     _loadPairedStore();
+    WidgetsBinding.instance.addObserver(this);
   }
 
   final SharedPreferences _prefs;
@@ -284,7 +288,22 @@ class DeviceListModel extends ChangeNotifier {
 
   // --- discovery ------------------------------------------------------------
 
+  /// True once [startDiscovery] has been called and [stopDiscovery] hasn't
+  /// -- independent of whether the periodic sweep timer is actually running
+  /// right now, since T-X21 pauses/resumes that timer around backgrounding
+  /// without the caller re-issuing start/stop.
+  bool _discoveryActive = false;
+
+  /// Whether the periodic sweep timer is currently running (T-X21 test
+  /// seam, mirroring [ClipboardEchoGuard]'s `@visibleForTesting` pattern):
+  /// `Timer` exposes no public "is this the current generation" query
+  /// usable from outside, so pause/resume is verified through this rather
+  /// than the timer instance itself.
+  @visibleForTesting
+  bool get isSweepTimerActiveForTest => _discoveryTimer != null;
+
   void startDiscovery() {
+    _discoveryActive = true;
     // Hold the Wi-Fi multicast lock for the duration of discovery (T-X20):
     // without it most devices filter the inbound mDNS multicast and browsing
     // silently finds nothing. No-op off Android.
@@ -303,6 +322,7 @@ class DeviceListModel extends ChangeNotifier {
   }
 
   void stopDiscovery() {
+    _discoveryActive = false;
     _discoveryTimer?.cancel();
     _discoveryTimer = null;
     // Drop the multicast lock while not discovering (T-X20) so it is not held
@@ -312,6 +332,32 @@ class DeviceListModel extends ChangeNotifier {
       _mdns.stopAdvertising().catchError(
           (Object e) => debugPrint('mdns stop advertise failed: $e')),
     );
+  }
+
+  /// T-X21: the periodic 5s sweep (each one a ~4s multicast burst, see
+  /// [sweep]) ran continuously even while the app sat backgrounded in the
+  /// tray -- pure waste of battery/radio with no UI to show results to.
+  /// Mirrors [ClipboardModel]'s own lifecycle-pause pattern: stop the timer
+  /// and release T-X20's multicast lock on anything other than `resumed`,
+  /// restart both (plus an immediate catch-up sweep, matching
+  /// [startDiscovery]'s own initial call) when the app comes back. A no-op
+  /// if discovery was never started (or was explicitly stopped) --
+  /// background/foreground transitions before pairing, or after leaving the
+  /// device list screen, must not spuriously spin discovery back up.
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (!_discoveryActive) return;
+    if (state == AppLifecycleState.resumed) {
+      unawaited(_mdns.acquireMulticastLock());
+      _discoveryTimer?.cancel();
+      _discoveryTimer =
+          Timer.periodic(const Duration(seconds: 5), (_) => sweep());
+      sweep();
+    } else {
+      _discoveryTimer?.cancel();
+      _discoveryTimer = null;
+      unawaited(_mdns.releaseMulticastLock());
+    }
   }
 
   void _advertise() {
@@ -410,6 +456,7 @@ class DeviceListModel extends ChangeNotifier {
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
     stopDiscovery();
     _mdns.dispose();
     super.dispose();

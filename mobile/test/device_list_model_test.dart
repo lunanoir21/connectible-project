@@ -2,6 +2,7 @@ import 'package:connectible_mobile/src/generated/connectible.pbgrpc.dart'
     as pb;
 import 'package:connectible_mobile/src/models/models.dart';
 import 'package:connectible_mobile/src/state/device_list_model.dart';
+import 'package:flutter/widgets.dart' show AppLifecycleState;
 import 'package:flutter_test/flutter_test.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -123,6 +124,56 @@ void main() {
 
       model.recordFingerprint('ghost', 'zzz');
       expect(model.pinnedFingerprint('ghost'), isNull);
+    });
+  });
+
+  group('DeviceListModel background/foreground sweep pause (T-X21)', () {
+    test('backgrounding stops the sweep timer, foreground restarts it',
+        () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final model = DeviceListModel(prefs, deviceName: 'Test Phone');
+      addTearDown(model.dispose);
+
+      model.startDiscovery();
+      expect(model.isSweepTimerActiveForTest, isTrue);
+
+      model.didChangeAppLifecycleState(AppLifecycleState.paused);
+      expect(model.isSweepTimerActiveForTest, isFalse);
+
+      model.didChangeAppLifecycleState(AppLifecycleState.resumed);
+      expect(model.isSweepTimerActiveForTest, isTrue);
+    });
+
+    test('a lifecycle change before startDiscovery is a harmless no-op',
+        () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final model = DeviceListModel(prefs, deviceName: 'Test Phone');
+      addTearDown(model.dispose);
+
+      // Discovery was never started: pausing/resuming must not spuriously
+      // spin the sweep timer up.
+      model.didChangeAppLifecycleState(AppLifecycleState.paused);
+      model.didChangeAppLifecycleState(AppLifecycleState.resumed);
+      expect(model.isSweepTimerActiveForTest, isFalse);
+    });
+
+    test('a lifecycle change after stopDiscovery is a harmless no-op',
+        () async {
+      SharedPreferences.setMockInitialValues({});
+      final prefs = await SharedPreferences.getInstance();
+      final model = DeviceListModel(prefs, deviceName: 'Test Phone');
+      addTearDown(model.dispose);
+
+      model.startDiscovery();
+      model.stopDiscovery();
+      expect(model.isSweepTimerActiveForTest, isFalse);
+
+      model.didChangeAppLifecycleState(AppLifecycleState.resumed);
+      expect(model.isSweepTimerActiveForTest, isFalse,
+          reason:
+              'resuming after an explicit stopDiscovery must not restart the timer');
     });
   });
 }

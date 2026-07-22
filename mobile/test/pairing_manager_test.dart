@@ -114,5 +114,29 @@ void main() {
       // re-pair (e.g. after being forgotten) is not throttled.
       expect(() => m.createPending('dev-h', 'Desk'), returnsNormally);
     });
+
+    test(
+        'distinct device flood is capped, but already-tracked devices '
+        'still work (T-X22)', () {
+      final m = PairingManager();
+      for (var i = 0; i < PairingManager.maxTrackedDevices; i++) {
+        expect(
+          () => m.createPending('flood-$i', 'Flooder'),
+          returnsNormally,
+          reason: 'device $i should still be under the cap',
+        );
+      }
+      // One more distinct, never-seen-before id is rejected...
+      expect(
+        () => m.createPending('flood-overflow', 'Flooder'),
+        throwsA(isA<RateLimitedException>()),
+      );
+      // ...but a device already tracked (e.g. the very first one, its
+      // pending PIN still live) is unaffected by the cap.
+      expect(
+        () => m.createPending('flood-0', 'Flooder'),
+        returnsNormally,
+      );
+    });
   });
 }
