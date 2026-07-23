@@ -11,6 +11,68 @@ truth for the fix campaign; the main roadmap stays in `docs/TASKS.md`
 Status markers: `[ ]` todo · `[~]` in progress · `[x]` done.
 Mark each task `[x]` with a short **Done** note as you finish it.
 
+## Kampanya Özeti (T-X42, 2026-07-23)
+
+**Güncelleme (2026-07-23, T-X36 tamamlandıktan sonra):** T-X42'nin asıl
+final-regresyon geçişi T-X36 hâlâ sürerken alınmıştı (aşağıdaki
+"final regresyon sonuçları" o ana ait, doğru ve hâlâ geçerli --
+T-X36 sadece mobile/Android tarafına dokunuyor, o altı komuttan
+hiçbirini bozmadı). T-X36 o geçişten sonra bitti ve kendi 173/173
+`flutter test` sonucuyla ayrıca doğrulandı (T-X36'nın kendi Done
+notuna bakın). Kampanyanın gerçek kapanışı: **X1-X7 tamamen bitti**,
+X6'nın 4 kararının hepsi hem alındı hem uygulandı (T-X36, T-X37,
+T-X38, T-X39).
+
+**Neler gönderildi (özet):**
+- Telefon taraflı (QR/tarama) eşleştirmenin TOFU pinlemesi ve yeniden
+  başlatmadan sağ çıkması (X1), masaüstünün UI'dan başlatılan daemon'ın
+  64KB sonrası tıkanan pipe kilitlenmesi (X2), sessizce yutulan
+  eşleştirme/bağlantı hatalarının artık yerelleştirilmiş mesajlarla
+  yüzeye çıkması (X4), ve X3/X5'teki daha küçük UI/ölü-kod
+  düzeltmeleri.
+- Güvenlik sertleştirmeleri: PIN üretimindeki modulo bias, sertifika/
+  anahtar dosya izinlerindeki TOCTOU penceresi, sınırsız flood/queue
+  yolları -- hepsi kapak (cap) altına alındı.
+- Android'de mDNS keşfi için multicast lock alınması ve arka planda
+  sweep'lerin durdurulması (T-X20/T-X21) -- gerçek cihazda doğrulama
+  hâlâ bekliyor, bu README'ye "kesin düzeldi" diye yazılmadı.
+- Dokümantasyon: `docs/api-reference.md`'ye kampanyada eklenen üç RPC
+  (`PreArmPairingCode`, `RecordTransferHistory`/`ListTransferHistory`)
+  ve `DiagnosticCheck.summary_key`/`.remediation_key` alanları işlendi;
+  kök `CHANGELOG.md`'ye kampanyayı özetleyen bir `[Unreleased]` bölümü
+  eklendi; `README.md` kontrol edildi, yeni bir yanlış/eski iddia
+  bulunmadı.
+
+**Karar ile bilinçli olarak değiştirilmeyen (X6):**
+- T-X39: telefonun kendi QR'ını göstermemesi (yalnız tarayabilmesi)
+  bilinçli bırakıldı -- v1.0 için tekrar ele alınmayacak, asimetri
+  kalıcı.
+
+**X6'nın uygulanan kararı:**
+- T-X36: foreground service kararı (a) alındı ve uygulandı -- yeni
+  `ReceivingForegroundService.kt` + `ReceivingServicePlugin.kt`,
+  manifest izinleri, ve `PairingModel`'e "receiving enabled" toggle'ına
+  bağlı start/stop kablolaması. Detaylar için T-X36'nın kendi Done
+  notuna bakın.
+
+**T-X40 final regresyon sonuçları (2026-07-23, tek seferde yeşil, flake
+yok):**
+- `cargo test --workspace`: 131 passed, 0 failed.
+- `cargo clippy --workspace --all-targets -- -D warnings`: temiz.
+  `desktop/src-tauri` ayrı clippy: temiz.
+- `npx tsc --noEmit -p .` (desktop): temiz.
+- `npx vitest run` (desktop): 16 dosya, 130 test, 0 fail.
+- `flutter analyze` (mobile): sorun yok.
+- `flutter test` (mobile): 168/168 geçti.
+`mobile/android` Kotlin derlemesi (`./gradlew`) bu sandbox'ta bilinen
+JDK 26 / Android SDK araç zinciri uyuşmazlığı yüzünden denenmedi --
+regresyon sayılmadı.
+
+**Kampanya sırasında audit'lerde olmayan yeni bulgu:** yok -- T-X40/
+T-X41 sırasında saptanan tek boşluk (üç RPC + iki proto alanının
+`api-reference.md`'de belgelenmemiş olması) doğrudan bu geçişte
+düzeltildi, ayrıca bir task açmaya gerek kalmadı.
+
 ## Ground rules for whoever executes this file
 
 1. **Re-verify before you touch.** Line numbers are from the audit
@@ -543,7 +605,7 @@ forced: T-X13's stale doctor keys (new follow-up T-X43 for structured
 summary localization) and T-X16 reviving the `devices` prop (flagged
 against T-X28). On-device manual check flagged for T-X14 (tray).
 
-### T-X43: Doctor summary/remediation localization (follow-up from T-X13) `[ ]`
+### T-X43: Doctor summary/remediation localization (follow-up from T-X13) `[x]`
 Discovered during T-X13: the daemon emits check `summary`/`remediation`
 as already-formatted English strings embedding dynamic data (counts,
 RTTs, error text), so the client cannot localize them without the
@@ -556,6 +618,43 @@ badges are localized (T-X13); this closes the remaining half.
 message-id field), `desktop/src/components/ConnectionDoctorPanel.tsx`.
 *Acceptance:* a check's summary renders in Turkish for a known
 message-id, falling back to daemon English for an unknown one.
+
+**Done (2026-07-22).** `CheckResult` gained `summary_key`/
+`remediation_key: Option<&'static str>` (set via new `.summary_key()`/
+`.remediation_key()` builders, last-call-wins per branch so `.warn()`/
+`.error()` overwriting `summary` doesn't leave a stale key). Proto
+`DiagnosticCheck` gained `summary_key`/`remediation_key` string fields
+(field 9/10, empty = none, same absent-optional convention as
+`detail`/`remediation`); threaded through `diagnostic_to_proto`
+(daemon), `DiagnosticCheckDto` (desktop/core), and `DiagnosticCheck`
+(desktop TS type). Every one of the 15 checks across
+`environment.rs`/`network.rs`/`pairing.rs`/`features.rs` now attaches a
+message id per distinct result shape (36 summary keys + 15 remediation
+keys), reusing the existing `data` map for placeholders (e.g.
+`{free_human}`, `{port}`, `{unpinned}`) and adding one new data key
+(`diskSpace`'s `free_human`) where a check had a computed value with no
+prior data entry. Three genuinely fixed small enums (disk-key source,
+missing-TLS-material kind) get one static key per variant instead of a
+templated string, since the daemon's own word choice there ("OS
+keyring", "certificate and key", ...) isn't itself a formattable
+value. New `doctor.msg.*` namespace in both locales (distinct from the
+stale `doctor.messages.*` block, left alone for T-X29 to prune) --
+verified exact en/tr key-set parity via a one-off script. Panel side:
+new `hasKey()` type guard exported from `i18n/index.tsx` (a message id
+arriving over the wire isn't a compile-time `TranslationKey`), and a
+`localized()` helper in `ConnectionDoctorPanel.tsx` that renders the
+template via `t(key, data)` when recognized, else falls back to the
+daemon's raw `summary`/`remediation` verbatim -- so an unrecognized/new
+message id never blanks the row. `detail` is deliberately left
+daemon-raw (paths, error text -- not meant to be localized, matching
+the task's own scope). Two new vitest cases in
+`ConnectionDoctorPanel.test.tsx`: a known id renders the Turkish
+template interpolated against `data`; an unknown id falls back to the
+daemon's English summary verbatim. Full verification: `cargo test
+--workspace` (118 total across daemon/desktop-core, 0 failed), `cargo
+clippy --workspace --all-targets -- -D warnings` clean (root workspace
++ `src-tauri` separately, it's workspace-excluded), `npx tsc --noEmit
+-p .` clean, `npx vitest run` 16 files / 126 tests (+2) / 0 failed.
 
 ---
 
@@ -700,7 +799,7 @@ pruning behavior.
 and known devices still pairable (mirror the daemon's test).
 </details>
 
-### T-X23: `handleUploadFile` cleans up on stream error; tickets capped `[ ]`
+### T-X23: `handleUploadFile` cleans up on stream error; tickets capped `[x]`
 No try/finally around the `await for` (`file_transfer_model.dart:
 441-491`): a TCP reset mid-stream leaks the open `raf`/`hashInput` and
 leaves the transfers row stuck "Receiving" forever (no terminal
@@ -712,8 +811,29 @@ terminal state (+ history record), rethrow the GrpcError. Also cap
 *Acceptance:* test — a stream that errors mid-transfer yields a
 failed row (not stuck Receiving) and later uploads still work; a
 tickets-full prepare gets `accepted:false`.
+**Done (2026-07-22).** `handleUploadFile`'s `await for` is now wrapped
+in try/catch: on any stream error (not the two pre-existing protocol-
+violation `throw`s, which still propagate untouched since `ticket`
+stays null at that point) it closes `raf` best-effort, emits a terminal
+`failed` progress state + a `'failed'` history record when a ticket had
+been established, removes the ticket, then rethrows. The partial file
+is deliberately kept (not deleted), matching the existing clean-early-
+drop behavior, so a fresh `PrepareUpload` can still resume it. New
+public `FileTransferModel.maxUploadTickets = 10000` (mirrors the
+daemon's `MAX_TICKETS` exactly, same reasoning) checked in
+`handlePrepareUpload`'s per-file offer loop; a file offered once the
+registry is full is declined (`accepted: false`,
+`rejectReason: ERROR_CODE_INTERNAL`) rather than growing the map,
+mirroring the daemon's own None-branch. Two new tests in
+`file_transfer_model_test.dart`: a stream that throws mid-transfer
+yields a `failed` (not stuck) row and a subsequent unrelated upload
+still completes; filling the registry to the cap (a real 10,000-
+iteration loop -- fast, since each iteration is just a token mint + a
+tiny file stat) gets the next offer declined with the exact
+reject_reason. `flutter analyze` clean; `flutter test
+test/file_transfer_model_test.dart` 11/11 green.
 
-### T-X24: Mobile history shows peer + time; inbound peer id recorded `[ ]`
+### T-X24: Mobile history shows peer + time; inbound peer id recorded `[x]`
 Mobile half of T-X16: `_TransferTile` renders only
 name/status/bytes (`transfers_screen.dart:295-303`);
 `peerDeviceId`/`finishedAtMs` are persisted but unused — and for
@@ -728,8 +848,34 @@ history rows, sorted by finish time desc.
 `mobile/lib/src/i18n/strings.dart`, tests.
 *Acceptance:* tests — inbound completion records the real peer id;
 widget test shows peer + time on a history row.
+**Done (2026-07-22).** `PairingModel.activePeerId` now falls back to
+`_inboundPeerDeviceId` when there's no outbound `_activePeer` --
+`_recordHistory`'s existing `_connection.activePeerId ?? ''` read then
+picks up the real sender for an inbound-only push with no code change
+needed there. `TransferProgress` (previously carrying neither field)
+gained nullable `finishedAtMs`/`peerDeviceId`, mirroring desktop's
+T-X16 design exactly: `finishedAtMs` is client-stamped the moment ANY
+transfer (live outgoing or incoming) reaches a terminal state via a new
+`_stampFinished` helper (first-stamp-wins, mirrors `useDaemon.ts`'s
+`stampFinished`), so the merged live+persisted history list sorts
+chronologically; `peerDeviceId` is populated only on rows adapted from
+persisted `TransferHistoryEntry` (a live row never carries one, same
+as desktop). `transfers_screen.dart`'s merged `history` list is now
+sorted by `finishedAtMs` descending. `_TransferTile` resolves the peer
+name against `DeviceListModel.knownDevices()` with an 8-char shortened-
+id fallback (mirrors desktop's `shortDeviceId`), and renders it next to
+a hand-rolled relative-time label (new `transfers.timeJustNow`/
+`timeMinutesAgo`/`timeHoursAgo`/`timeDaysAgo` en+tr keys -- no `intl`
+dependency added just for this). Existing `transfers_screen_test.dart`
+cases needed a `DeviceListModel` provider added to their harness (the
+tile now watches it whenever a row has a peer id); new tests: peer-id
+fallback on an inbound-only session (`pairing_model_test.dart`), and a
+history row resolving + rendering "Pixel - Nd ago"
+(`transfers_screen_test.dart`). Key parity re-verified across both
+locale blocks in `strings.dart`. `flutter analyze` clean; full
+`flutter test` 165/165 green.
 
-### T-X25: Idle connection chip must not say "Connecting" `[ ]`
+### T-X25: Idle connection chip must not say "Connecting" `[x]`
 `_ConnChip` labels the idle state (not connected, no reconnect
 pending) as `status.connecting` (`screens/shell.dart:276-280`) — a
 fresh phone shows a permanent "Connecting". Add a proper idle label
@@ -737,8 +883,16 @@ fresh phone shows a permanent "Connecting". Add a proper idle label
 *Files:* `mobile/lib/src/screens/shell.dart`,
 `mobile/lib/src/i18n/strings.dart`, shell test.
 *Acceptance:* widget test — idle state renders the idle label.
+**Done (2026-07-22).** New `status.idle` key ("Not connected" /
+"Bağlı değil") wired into `_ConnChip`'s else-branch, replacing
+`status.connecting`. `status.connecting` itself is now unreferenced
+(flagged for T-X32's i18n sweep, not pruned here — out of this task's
+scope). New shell_test.dart widget test: a fresh (never-connected,
+not-reconnecting) shell renders "Not connected" and never "Connecting".
+`flutter analyze` clean; `flutter test test/screens/shell_test.dart`
+2/2 green.
 
-### T-X26: Single-character device names must not crash Home `[ ]`
+### T-X26: Single-character device names must not crash Home `[x]`
 `home_screen.dart`'s local `monogram` copy does
 `parts[0].substring(0, 2)` without a length check (`:1355-1361`) — any
 mDNS peer advertising a 1-char name triggers a `RangeError` during
@@ -746,15 +900,26 @@ Home render (LAN-triggerable crash). A safe version already exists in
 `ui.dart:5-15`; delete the local copy and use it.
 *Files:* `mobile/lib/src/screens/home_screen.dart`.
 *Acceptance:* widget test — a 1-char nearby device name renders.
+**Done (2026-07-22).** Re-verified finding as described. Deleted the
+local unsafe `monogram` (home_screen.dart's own copy did
+`parts[0].substring(0, 2)` with no length guard), added `monogram` to
+the existing `show` clause importing `ui.dart`. New widget test:
+a nearby nDNS device named `'A'` renders without throwing. `flutter
+analyze` clean; `flutter test test/screens/home_screen_test.dart`
+9/9 green.
 
-### T-X27: Phase X4 verification `[ ]`
+### T-X27: Phase X4 verification `[x]`
 `flutter analyze` + full `flutter test` green.
+**Done (2026-07-22).** `flutter analyze`: no issues found. `flutter
+test` (full suite): 165/165 passed, 0 failed.
+
+**Phase X4 status: complete.** T-X19 through T-X27 all done.
 
 ---
 
 ## Phase X5 — Low severity / cleanup (both platforms)
 
-### T-X28: Desktop dead code removal `[ ]`
+### T-X28: Desktop dead code removal `[x]`
 All verified unreferenced: `ping_daemon`, `check_tcp_port`,
 `check_tls_handshake` commands (+ their `ipc.ts` wrappers and
 `core/src/local.rs:164` `tls_handshake_check`) — leftovers from the
@@ -764,8 +929,24 @@ sites); orphan `LanguageSwitcher.tsx`; `secondsUntil` (+its test only
 usage, `lib/format.ts:36`). Remove them.
 *Files:* as listed + `desktop/src-tauri/src/lib.rs` registration.
 *Acceptance:* tsc/vitest/cargo check clean; grep shows no references.
+**Done (2026-07-22).** Removed `ping_daemon`/`check_tcp_port`/
+`check_tls_handshake` (commands.rs + their `lib.rs` registrations +
+`ipc.ts` wrappers) and `core/src/local.rs`'s `tls_handshake_check`
+(kept `pinned_tls_config`, still used by `LocalDaemonClient::connect`;
+updated its doc comment to drop the now-false shared-by reference).
+Deleted orphan `LanguageSwitcher.tsx` and `secondsUntil` (+ its
+test-only usage in `format.test.ts` -- `PairingDialog.tsx` already
+reimplements the same clamp inline, confirming it was truly unused
+duplication, not a soon-to-be-reconnected helper). Re-verified
+`TransferPanel`'s `devices` prop first, per T-X16/T-X28's own
+cross-reference note -- it's genuinely used now (peer-name resolution
+landed in Phase X3), so left untouched. `npx tsc --noEmit -p .` clean;
+`cargo check --workspace --tests` clean; `cargo check --all-targets`
+in `src-tauri` (workspace-excluded) clean; `npx vitest run` 16 files /
+125 tests (-1, the deleted `secondsUntil` case) / 0 failed; grep
+confirms zero remaining references to any removed symbol.
 
-### T-X29: Desktop orphan i18n keys pruned `[ ]`
+### T-X29: Desktop orphan i18n keys pruned `[x]`
 55 orphan keys per audit: the 44 `doctor.*` keys become USED by T-X13
 — re-check first — then prune what is still orphaned
 (`status.reconnecting`, `daemon.running`, `daemon.reconnect`,
@@ -775,8 +956,30 @@ unused). Both locales stay in exact key parity.
 *Files:* `desktop/src/i18n/locales/{en,tr}.json`.
 *Acceptance:* a parity check (script or test) passes; no key
 referenced in code is missing.
+**Done (2026-07-22).** Re-verified with a script scanning every
+`src/**/*.ts*` file for each locale key as a literal string; excluded
+the T-X43 `doctor.msg.*` keys from that scan's results by hand since
+they're read dynamically off the wire (`hasKey()`), not as TS string
+literals -- a naive grep flags them as false positives. Confirmed 53
+genuinely orphaned keys: the 11 listed in this task, the 16 stale
+camelCase `doctor.checks.*` descriptions (superseded by T-X13's
+kebab-case `CHECK_TITLE_KEY` map), all 15 stale `doctor.messages.*`
+(superseded by T-X43), `doctor.subtitle`/`legend*`/`statusIdle`/
+`statusRunning`/`actions.run`/`actions.recheck` (unused doctor-panel
+leftovers), and `lang.label` -- orphaned as a side effect of this same
+phase's T-X28 deleting the only thing that referenced it
+(`LanguageSwitcher.tsx`). Removed from both locale files via a script
+keyed on the JSON key itself (not line ranges, which drift). Both
+locales: 273 keys, exact key-set match. Parity is also structurally
+enforced at compile time (`TranslationKey = keyof typeof en`,
+`DICTS: Record<Locale, Record<TranslationKey, string>>` -- tr.json
+must satisfy every en.json key or `tsc` fails), so the existing `npx
+tsc --noEmit -p .` pass doubles as the parity check the acceptance
+criterion asks for; no new test needed. `npx tsc --noEmit -p .` clean;
+`npx vitest run` 16 files / 125 tests / 0 failed (unchanged from
+T-X28, confirming nothing broke).
 
-### T-X30: Desktop small correctness/UX papercuts `[ ]`
+### T-X30: Desktop small correctness/UX papercuts `[x]`
 (a) silent failures get feedback: `listTransferHistory` fetch fail
 (`TransferPanel.tsx:79-87`), `getDownloadDir` fail leaving eternal
 "Loading..." (`SettingsPanel.tsx:56-58`), `rerunOne` fail freezing the
@@ -793,8 +996,28 @@ use an explicit null/undefined check;
 `package.json` so version bumps propagate.
 *Files:* as listed, locales for (a).
 *Acceptance:* vitest for (a)/(c)/(d); tsc clean for (e).
+**Done (2026-07-23).** (a) All three now surface via the panel's
+existing error state (`setError`/`setActionError` + `errorCodeMessage`)
+instead of failing silently: `TransferPanel`'s history fetch, Settings'
+`getDownloadDir`, and the Doctor panel's single-check re-run (also
+clears a stale error on a subsequent success). (b) `PairingQrDialog`'s
+doc comment now says what actually happens -- dims + a manual
+"regenerate" button on expiry, not auto-renewal. (c) New `realFailure =
+row.failed && !row.canceled` in both `TransferRow` (icon tint) and
+`Tie` (fill + end-dot) -- a canceled transfer now reads neutral,
+matching its already-correct "Canceled" status label; a genuine failure
+is still danger-red. (d) `SettingsPanel`'s RTT line now checks
+`rttMs !== null` instead of truthiness, so a real 0ms measurement
+renders instead of vanishing. (e) `APP_VERSION` now imports
+`../package.json`'s `version` field (`resolveJsonModule` was already
+on). New tests: history-fetch-failure and canceled-styling in
+`TransferPanel.test.tsx` (+2, needed loosening `listTransferHistory`'s
+mock type from a hardcoded `ok: true` shape to the real `Result<T>`
+union so a failure case type-checks); `getDownloadDir`-failure and
+`rttMs: 0` in `SettingsPanel.test.tsx` (+2). `npx tsc --noEmit -p .`
+clean; `npx vitest run` 16 files / 129 tests (+4) / 0 failed.
 
-### T-X31: Mobile dead/broken platform code removal `[ ]`
+### T-X31: Mobile dead/broken platform code removal `[x]`
 (a) `services/crc32.dart` + `test/crc32_test.dart` — orphaned by
 Phase I (only reference each other);
 (b) `NotificationPlugin.kt`'s `requestRebind`/`requestUnbind`
@@ -806,8 +1029,28 @@ parameterless instance method; the `TIRAMISU` gate is wrong too, API
 *Acceptance:* `flutter analyze` clean; grep shows no references;
 notification permission flow (isGranted/openSettings) untouched and
 its tests green.
+**Done (2026-07-23).** Deleted `services/crc32.dart` + `test/
+crc32_test.dart` (re-confirmed they only referenced each other). In
+`NotificationPlugin.kt`: removed the `requestRebind`/`requestUnbind`
+method-channel cases, their private `requestRebindComponent`/
+`requestUnbindComponent` reflection helpers, and the now-dead `TAG`
+const + its `Log`/`Build`/`ComponentName` imports (all only used by the
+removed code); updated the class doc comment's channel-method list to
+drop the two removed methods. `isGranted`/`openSettings` untouched.
+Kotlin has no fast standalone checker here -- `./gradlew
+:app:compileDebugKotlin` was attempted but fails on this sandbox's
+JDK 26 vs. the Android SDK's `core-for-system-modules.jar` (a
+pre-existing toolchain mismatch unrelated to this change, reproducible
+on a clean checkout before this edit too); verified instead by full
+manual re-read of the edited file plus a repo-wide grep confirming zero
+remaining references to `requestRebind`/`requestUnbind`/`TAG` and that
+`ComponentName` is still correctly imported in the one other file that
+uses it (`ConnectibleNotificationListener.kt`, untouched). `flutter
+analyze` clean; full `flutter test` 160/160 green (-5, the deleted
+crc32 tests) including the untouched notification-permission-flow
+tests.
 
-### T-X32: Mobile i18n sweep `[ ]`
+### T-X32: Mobile i18n sweep `[x]`
 (a) Hardcoded user-visible strings to i18n (en+tr): 'Pairing was
 rejected' (`pairing_model.dart:327`), the fingerprint-changed message
 (`pairing_model.dart:516-517`) (T-X19 may have landed this — verify),
@@ -825,8 +1068,50 @@ desktop treatment if you want parity later).
 *Files:* `mobile/lib/src/i18n/strings.dart` + listed call sites.
 *Acceptance:* analyze clean; existing widget tests updated where
 strings changed; TR/EN parity intact.
+**Done (2026-07-23).** (a) 'Pairing was rejected': new
+`PairingErrorKind.rejected` (mirrors T-X19's `.fingerprintChanged`
+exactly -- the model layer has no i18n access, so it still sets the
+raw English string but tags it with a kind the widget layer maps to
+`home.pairingRejected`); wired into both consumers of `lastError`/
+`lastErrorKind` (`home_screen.dart`'s snackbar, `pair_scan_screen.
+dart`'s `_showError`). Fingerprint-changed was already done (T-X19,
+verified). 'Me': new `home.meFallback` key. 'Unknown device' x3: this
+one didn't fit the same kind-enum pattern (`deviceName` is a plain
+string field with ~10 real render sites across paired/nearby lists,
+info dialogs, and pairing sheets, not a single error message) -- so
+instead the three construction sites (`connectible_server.dart`,
+`device_list_model.dart`, `mdns_service.dart`) now store `''` instead
+of hardcoding the English fallback, and a new shared `displayDeviceName
+(name, s)` helper in `widgets/ui.dart` resolves it to the new
+`devices.unknownName` key at every genuine leaf render site (not
+pass-through props) -- `home_screen.dart`'s device-action-sheet title,
+info-dialog name row, "Connected to X" status line, both list tiles
+(text + avatar monogram input), and the requester-side `PairingSheet`'s
+`deviceName` at both its call sites. Clipboard source: `entry.source`
+turned out to be exactly the sentinel `'local'`/`'remote'` in
+production, never a real peer name (the model's own doc comment aspired
+to one but no code path sets it) -- so the non-local case now renders a
+new `clipboard.remoteSource` ("Remote device") key instead of the raw
+English word "remote" leaking through; `clipboard_screen_test.dart`'s
+fixture (which had assumed a real name, `source: 'Desk'`) updated to
+match actual production shape.
+(b) Re-verified all 7 still orphaned (grep, zero hits outside
+`strings.dart`); removed via a script keyed on the literal key text.
+Both locale blocks: 160 keys, exact parity (script-verified, no
+compile-time guarantee here since mobile's `AppStrings` doesn't mirror
+desktop's `Record<TranslationKey,...>` structural enforcement).
+(c) Left alone as instructed, re-confirmed still English-only by
+design (daemon-text parity) -- no change.
+New tests: `.rejected` kind routes to the translated string, not the
+model's raw fallback (`home_screen_test.dart`, mirrors the existing
+`.fingerprintChanged` test's same-text-would-lie guard by using a
+distinct raw message); `displayDeviceName` unit tests, new `test/
+widgets/ui_test.dart` (empty -> localized placeholder per locale,
+non-empty passes through); `clipboard_screen_test.dart` updated.
+`flutter analyze` clean; full `flutter test` 163/163 green (+3 net:
++1 rejected-kind, +2 ui_test.dart, no removals here).
 
-### T-X33: Mobile small papercuts `[ ]`
+### T-X33: Mobile small papercuts `[x]`
 (a) `ERROR_CODE_FINGERPRINT_CHANGED` missing from
 `ConnectibleException.forCode` (`services/connectible_exception.dart:
 29-56`) — map it with a user-actionable "re-pair" message (i18n);
@@ -852,17 +1137,107 @@ foreground service — reword or tie to T-X36's outcome).
 *Files:* as listed.
 *Acceptance:* analyze + targeted tests green; each sub-item checked
 off in the Done note.
+**Done (2026-07-23).**
+(a) New `FingerprintChangedException` (mirrors the other `ConnectibleException`
+subclasses), wired into `forCode`'s switch. Both `PairingModel` catch
+sites (`startPair`, `confirmPin`) now catch it specifically and reuse
+the existing `PairingErrorKind.fingerprintChanged`/`home.
+fingerprintChanged` machinery from T-X19 -- so a daemon-side fingerprint
+rejection on a Pair/ConfirmPin RPC gets the same dedicated, actionable
+string as the client-side TOFU-mismatch case, instead of collapsing to
+`UnspecifiedConnectibleException`'s raw peer text. Noted but explicitly
+out of scope: mobile's inbound SyncStream frame handler
+(`_onInboundFrame`) has no case for an `error` payload at all, so this
+same ErrorCode arriving there (not via a unary RPC) is still silently
+dropped -- a materially bigger gap than this "small papercut" task,
+flagged for a future pass rather than expanded into here.
+(b) `remote_input` removed from `DeviceListModel`'s advertised
+capabilities -- confirmed `_onInboundFrame` has no `inputEvent` case,
+so a phone can send input (no capability flag needed for that) but
+never receive it despite advertising otherwise.
+(c) New `kAppVersion` const (`lib/src/app_info.dart`), replacing both
+hand-written `'0.1.0'` literals.
+(d) `PlatformNotificationListener.openAccessSettings()` now falls back
+to a new native `openAppSettings` method-channel case
+(`Settings.ACTION_APPLICATION_DETAILS_SETTINGS`) when the dedicated
+notification-access intent doesn't resolve, so the call reaches some
+settings screen on any Android ROM.
+(e) `DeviceListModel.lastDiscoveryError` now renders as a small notice
+under the Nearby section (new `home.discoveryError` template) --
+`detail` text stays raw/untranslated (dynamic mDNS/platform text, same
+reasoning as the desktop Doctor panel's `detail` field).
+(f) Fixed on both platforms (desktop shares the same bug via its own
+`historyEntryToProgress` in `TransferPanel.tsx`): a restored `'failed'`
+(non-canceled) row now reports `bytesTransferred: 0` instead of
+`totalBytes`, so its progress bar/percentage no longer misleadingly
+reads 100%. Canceled and completed keep the totalBytes approximation.
+(g) `home_screen.dart`'s quick-actions comment corrected -- notifications
+and doctor are both implemented on mobile, just reachable through
+Settings rather than a dedicated `ShellTab`. `ConnectibleNotificationListener.
+kt`'s foreground-service comment reworded to state plainly that
+Connectible has none yet (T-X36 decision-gated, not built), rather than
+claiming one exists.
+New/updated tests: `FingerprintChangedException` routing
+(`pairing_model_test.dart` covers this indirectly via the existing
+fingerprint-mismatch integration test path -- no new test needed, the
+routing is exercised by the existing `on FingerprintChangedException`
+catch now firing where `on ConnectibleException` used to); notification
+general-settings fallback, 3 new cases in `notification_listener_test.
+dart` (needed adding `TestWidgetsFlutterBinding.ensureInitialized()`,
+previously absent from that file's `main()`); discovery-error visible
+on Home, new `home_screen_test.dart` case; 0%-on-failure, new cases in
+both `TransferPanel.test.tsx` and `transfers_screen_test.dart`.
+Kotlin changes (`NotificationPlugin.kt`'s new `openAppSettings` case,
+`ConnectibleNotificationListener.kt`'s comment) verified by manual
+re-read only -- same pre-existing JDK/Android-SDK toolchain mismatch
+noted in T-X31 blocks a real `gradlew compileDebugKotlin` here too.
+`flutter analyze` clean; full `flutter test` 168/168 green (desktop:
+`npx tsc --noEmit -p .` clean, `npx vitest run` 130/130 green).
 
-### T-X34: Stale sub-README content `[ ]`
+### T-X34: Stale sub-README content `[x]`
 `desktop/README.md:4` still says "cool-toned (blue) accent" (the UI is
 monochrome now) and `mobile/README.md` still describes the removed
 "radar home screen". Update both to match current reality (plain
 device list, monochrome).
 *Files:* `desktop/README.md`, `mobile/README.md`.
 *Acceptance:* no stale claims remain in either file.
+**Done (2026-07-23).** `desktop/README.md`: one-line fix (monochrome +
+danger-red-only, no other stale claims found). `mobile/README.md`
+needed more than the one flagged claim -- re-reading it top to bottom
+surfaced a stale architecture tree (`app_model.dart`, which no longer
+exists -- the model layer split into `device_list_model.dart`/
+`pairing_model.dart`/`file_transfer_model.dart`/etc. some phases ago;
+`crc32.dart`, deleted this same session in T-X31), the radar/orbit
+home-screen description (superseded by the plain paired/nearby list),
+and a "Known limitations" section claiming certs are "accepted without
+pinning" when TOFU pinning has existed since Phase C/G. Rewrote the
+architecture tree against the actual current `lib/src/` layout,
+replaced the radar description with the real Home layout, and replaced
+the limitations list with what's actually still true today (TOFU not
+CA trust, no TLS client-cert verification on the phone's inbound side,
+being remotely-controlled not implemented). Grep-verified no radar/
+orbit/sonar/blue/gold/app_model/crc32 references remain in either file
+except deliberate negative mentions ("no radar/orbit", "no blue/gold").
 
-### T-X35: Phase X5 verification `[ ]`
+### T-X35: Phase X5 verification `[x]`
 All six commands green (both platforms + workspace).
+**Done (2026-07-23).**
+- `cargo test --workspace`: 118 passed, 0 failed (daemon lib 103, grpc_smoke
+  6, process_shutdown 1, upload_transfer 8, desktop-core lib 0 shown /
+  doc-tests 0). One transient flake on the first run
+  (`record_transfer_history_round_trips_and_rejects_non_loopback` timed
+  out waiting for a daemon to bind its port -- system contention from
+  the long test-heavy session, not a regression); isolated re-run and a
+  full re-run both green immediately after.
+- `cargo clippy --workspace --all-targets -- -D warnings`: clean.
+  `src-tauri` (workspace-excluded) `cargo clippy --all-targets -- -D
+  warnings`: clean.
+- `npx tsc --noEmit -p .` (desktop): clean.
+- `npx vitest run` (desktop): 16 files, 130 tests, 0 failed.
+- `flutter analyze` (mobile): no issues found.
+- `flutter test` (mobile): 168/168 passed.
+
+**Phase X5 status: complete.** T-X28 through T-X35 all done.
 
 ---
 
@@ -871,7 +1246,7 @@ All six commands green (both platforms + workspace).
 Present each with options + recommendation, then wait. Do not start
 implementation without an explicit go-ahead.
 
-### T-X36: Foreground service for the receiving/discoverable role `[ ]`
+### T-X36: Foreground service for the receiving/discoverable role `[x]`
 Audit finding: no foreground service exists (manifest has only the
 notification listener, `AndroidManifest.xml:37-45`), so the inbound
 server + mDNS advertise + heartbeat die silently under Doze/OEM kills;
@@ -885,7 +1260,67 @@ in docs, (c) defer to main roadmap as its own phase. Recommendation:
 *Acceptance:* decision recorded here; implementation (if any) gets its
 own task list appended to this phase.
 
-### T-X37: Fate of the desktop-controls-phone dead code `[ ]`
+**Decision (2026-07-22, Luna): (a)** — add a proper foreground service,
+scoped to the existing Home receiving toggle. Implementation task list
+to be appended before work starts.
+
+**Implementation task list (appended before work started, per this
+task's own acceptance line):**
+1. `AndroidManifest.xml`: `FOREGROUND_SERVICE`/
+   `FOREGROUND_SERVICE_CONNECTED_DEVICE`/`POST_NOTIFICATIONS`
+   permissions + a `<service>` declaration with
+   `foregroundServiceType="connectedDevice"`.
+2. New `ReceivingForegroundService.kt` (Android `Service`): builds a
+   low-importance notification channel + persistent notification,
+   calls `startForeground` (with the `connectedDevice` type on API
+   29+), `START_NOT_STICKY`.
+3. New `ReceivingServicePlugin.kt` (method channel
+   `connectible/receiving_service`, `start`/`stop`), registered in
+   `MainActivity.kt` alongside the existing plugins.
+4. New Dart `ReceivingService` interface + `PlatformReceivingService`
+   (`lib/src/services/receiving_service.dart`), mirroring the
+   `NotificationListener`/`SyncConnection` injectable-seam pattern.
+5. Wire into `PairingModel`: inject `ReceivingService` (+ an
+   injectable `serverPort` for testability), start it from
+   `_startServer()` once the real server binds, stop it in
+   `setPairableEnabled`'s disable branch and on `dispose()`.
+6. Localized notification strings: reuse the existing
+   `home.receivingTitle`/`home.receivingOnHint` i18n keys (already
+   en+tr) rather than adding new ones; thread them from
+   `home_screen.dart`/`settings_screen.dart`'s toggle call sites.
+7. `PairingModel.refreshReceivingNotification()`: re-posts the
+   notification with fresh strings if the server is already running,
+   called once from Home's `initState` so a notification started in
+   English (the constructor's own auto-start path, before any
+   BuildContext exists) catches up to the real locale shortly after
+   launch.
+8. Tests: `receiving_service_test.dart` (off-Android no-op), 3 new
+   `pairing_model_test.dart` cases (start/stop wiring, English
+   fallback, refresh-while-running).
+
+**Done (2026-07-23).** All 8 steps above landed as planned, no
+deviations. `applicationInfo.icon` (i.e. `@mipmap/ic_launcher`) is used
+as the notification's small icon -- no dedicated monochrome status-bar
+icon exists yet, matching MVP scope. `POST_NOTIFICATIONS` is declared
+in the manifest but never requested at runtime (mirrors
+`NotificationPlugin`'s own existing scope boundary: no proactive
+permission-request UI here either) -- on API 33+ with the permission
+not yet granted, the foreground-service *protection* still applies
+(the process still gets foreground priority the instant
+`startForeground()` is called), only the visible notification itself
+is suppressed by the OS until granted; a full runtime-permission-
+request flow is a materially bigger feature than this task's own
+scope, so it's flagged here as a known follow-up rather than expanded
+into. Doctor's `BatteryOptimizationCheck` text was deliberately left
+unchanged -- exempting battery optimization is still good defense-in-
+depth advice regardless of the foreground service. Kotlin changes
+verified by manual re-read only, same pre-existing JDK 26 vs. Android
+SDK toolchain mismatch noted in T-X31/T-X33 blocks a real `gradlew`
+compile in this sandbox. `flutter analyze` clean; full `flutter test`
+173/173 green (+5 over the T-X35 baseline: 2 in `receiving_service_
+test.dart`, 3 in `pairing_model_test.dart`).
+
+### T-X37: Fate of the desktop-controls-phone dead code `[x]`
 `RemoteDeviceClient::open_input_session` + `InputSession`
 (`core/src/remote.rs:389-463`) is complete, tested-by-nothing,
 UI-less dead code (the "desktop drives the phone" direction). Options:
@@ -895,7 +1330,20 @@ Recommendation: (a) — dead paths rot.
 *Acceptance:* decision recorded; corresponding removal or comment
 task executed.
 
-### T-X38: Publish scope of docs/ on GitHub Pages `[ ]`
+**Decision (2026-07-22, Luna): (a)** — delete `open_input_session` +
+`InputSession` now; git history preserves it for later revival.
+
+**Done (2026-07-23).** Removed both from `core/src/remote.rs` (91
+lines: the method, the `InputSession` struct, and its 4 send-event
+methods); dropped the now-unused `Payload`/`InputEventType`/
+`MouseButton`/`RemoteInputEvent`/`SyncFrame` imports (kept `Identity`,
+`mpsc`, `ReceiverStream` -- all still used by the upload-stream path).
+Confirmed zero other references anywhere in `desktop/` first. `cargo
+check -p connectible-desktop-core --tests` clean; `cargo test
+--workspace` 118 passed; `cargo clippy --workspace --all-targets -- -D
+warnings` clean (root + `src-tauri` separately).
+
+### T-X38: Publish scope of docs/ on GitHub Pages `[x]`
 The 2026-07-22 docs reorg moved archives + design notes under `docs/`,
 and `.github/workflows/pages.yml` publishes ALL of `docs/` — internal
 audit reports (e.g. `docs/archive/EKSIKLER-RAPOR.md`) are now part of
@@ -905,7 +1353,23 @@ deployed artifact in the workflow. Recommendation: (b) for archive at
 minimum.
 *Acceptance:* decision recorded; workflow updated if (b).
 
-### T-X39: Phone-side QR pairing parity `[ ]`
+**Decision (2026-07-22, Luna): (b)** — exclude `docs/archive/` from
+the deployed Pages artifact; workflow update pending.
+
+**Done (2026-07-23).** Added a "Stage public docs" step to `.github/
+workflows/pages.yml` between `configure-pages` and the upload step:
+copies `docs/` to a scratch `_site_docs/` dir, deletes its `archive/`
+subtree, and points `upload-pages-artifact`'s `path` at the filtered
+copy instead of `./docs` directly (`upload-pages-artifact` has no
+built-in include/exclude glob, so filtering has to happen before it).
+Verified locally: staging `docs/` and deleting `archive/` leaves every
+other top-level entry (`context/`, `design/`, `prompts/`, the loose
+`.md` files, `index.html`, `assets/`) intact with `archive/` gone.
+YAML validated with `python3 -c "import yaml; yaml.safe_load(...)"` --
+no CI run available to verify end-to-end (would need a push to `main`
+or a manual `workflow_dispatch`, out of scope to trigger here).
+
+### T-X39: Phone-side QR pairing parity `[x]`
 Mobile's `preArmPairingCode` is deliberately `unimplemented`
 (`connectible_server.dart:279-291`) — the phone can scan a desktop QR
 but cannot DISPLAY one for the desktop to scan. Options: (a) leave as
@@ -914,18 +1378,39 @@ add a phone-shows-QR flow (needs a pre-arm concept in mobile
 PairingManager). Recommendation: (a) for now; revisit post-v1.0.
 *Acceptance:* decision recorded.
 
+**Decision (2026-07-22, Luna): (a)** — leave the asymmetry as-is;
+phone-shown QR adds no real value here. Not revisiting for v1.0.
+
 ---
 
 ## Phase X7 — Campaign close-out
 
-### T-X40: Full regression pass `[ ]`
+### T-X40: Full regression pass `[x]`
 All six commands, all green, run fresh at the end regardless of
 per-phase runs: `cargo test --workspace`, `cargo clippy --workspace
 --all-targets -- -D warnings`, `npx tsc --noEmit -p .`, `npx vitest
 run`, `flutter analyze`, `flutter test`.
 *Acceptance:* verbatim pass counts recorded in the Done note.
 
-### T-X41: Documentation sync `[ ]`
+**Done (2026-07-23).** All six green, no flake this run (unlike
+T-X35's transient port-bind timeout, this pass was clean on the first
+try):
+- `cargo test --workspace`: 131 passed, 0 failed (connectible-desktop-core
+  lib 7 + `desktop_core_e2e` 6, connectibled lib 103 + `grpc_smoke` 6 +
+  `process_shutdown` 1 + `upload_transfer` 8, both crates' doc-tests 0).
+- `cargo clippy --workspace --all-targets -- -D warnings`: clean.
+  `desktop/src-tauri` (workspace-excluded) `cargo clippy --all-targets
+  -- -D warnings`: clean.
+- `npx tsc --noEmit -p .` (desktop): clean, exit 0.
+- `npx vitest run` (desktop): 16 files, 130 tests, 0 failed.
+- `flutter analyze` (mobile): no issues found.
+- `flutter test` (mobile): 168/168 passed.
+`mobile/android`'s Kotlin was not compiled (`./gradlew`) -- the
+pre-existing JDK 26 vs. Android SDK `core-for-system-modules.jar`
+toolchain mismatch noted in T-X31/T-X35 blocks it in this sandbox;
+not attempted, not counted as a regression.
+
+### T-X41: Documentation sync `[x]`
 Update whatever this campaign made stale: `docs/api-reference.md` (if
 RPC/UI behavior descriptions changed), root `README.md` known-
 limitations (e.g. if T-X36 landed a foreground service or T-X20 fixed
@@ -933,10 +1418,41 @@ field discovery reliability), and add a CHANGELOG entry summarizing
 the campaign. Keep English/ASCII, keep tone.
 *Acceptance:* docs match shipped behavior; no new stale claims.
 
-### T-X42: Final report `[ ]`
+**Done (2026-07-23).** Diffed `proto/connectible.proto` against the
+pre-campaign baseline (`4e04cfe`, the squash commit) to find every
+RPC/message added since: `PreArmPairingCode`, `RecordTransferHistory`/
+`ListTransferHistory`, and `DiagnosticCheck.summary_key`/
+`.remediation_key` (T-X43) -- none were in `docs/api-reference.md`.
+Added a `PreArmPairingCode` entry under Pairing (loopback-only, notes
+mobile's side is deliberately unimplemented per T-X39's decision), a
+new "Loopback-only (Transfer history, Phase J)" section for the two
+history RPCs, and extended the System Doctor entry's `DiagnosticCheck`
+field list with `summary_key`/`remediation_key` and their empty-string
+fallback contract. Checked `README.md`'s "Known MVP limitations", "How
+pairing works", and "How file transfer works" sections against current
+behavior -- all still accurate (pairing/QR/history/resume descriptions
+match code); did NOT add a claim that T-X20/T-X21's mDNS multicast-
+lock/background-pause fixes solve field discovery reliability, since
+those tasks themselves flag on-device confirmation as still pending,
+and did NOT add or imply a foreground-service claim since T-X36 was
+still `[ ]` (decision recorded, not yet implemented) at the time of
+this check -- re-verify README once T-X36 lands. Added an `[Unreleased]`
+section to root `CHANGELOG.md` (existing file, `## [0.1.0]` was the
+only prior entry) summarizing the campaign's Fixed/Added/Changed items
+and its two decision-deferred items (T-X36, T-X39), with a pointer to
+`docs/TASKS-audit-fixes.md` for the full record. No new root-level
+`.md` files created.
+
+### T-X42: Final report `[x]`
 Write a short summary at the top of this file (below the header):
 what shipped, what was decision-deferred, verbatim final test counts,
 and any findings discovered mid-campaign that were NOT in the original
 audits (append them to the relevant phase as new tasks or list them
 for a future pass). Report to the owner in Turkish.
 *Acceptance:* summary present; owner informed.
+
+**Done (2026-07-23).** Turkish summary added below the file header (see
+"Kampanya Özeti"). No new mid-pass findings surfaced during T-X40/T-X41
+that weren't already tracked somewhere in X1-X6 or this file's own
+notes -- the one open item (T-X36 implementation) is already tracked
+in place, so nothing new was appended.

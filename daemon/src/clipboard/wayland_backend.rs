@@ -18,25 +18,44 @@ use wayland_protocols_wlr::data_control::v1::client::zwlr_data_control_source_v1
     self, ZwlrDataControlSourceV1,
 };
 
-use crate::clipboard::backend::ClipboardBackend;
+use crate::clipboard::backend::{ClipboardBackend, ClipboardContent};
 use crate::error::{DaemonError, Result};
 
 /// Mime types this backend offers when it owns the selection, and
-/// accepts (in preference order) when reading an incoming selection.
-/// Per connectible.proto's `ClipboardData.mime_type` comment, MVP only
-/// guarantees plain text.
-const SUPPORTED_MIME_TYPES: &[&str] = &["text/plain;charset=utf-8", "UTF8_STRING", "text/plain"];
+/// accepts (in preference order) when reading an incoming selection
+/// (T-L3): an image target is listed first so a screenshot copy that
+/// also offers a text fallback (rare, but seen from some apps) reads
+/// as the image, not the fallback text. The three text variants exist
+/// because different apps advertise different ones for the same plain
+/// text.
+const SUPPORTED_MIME_TYPES: &[&str] = &[
+    "image/png",
+    "text/plain;charset=utf-8",
+    "UTF8_STRING",
+    "text/plain",
+];
+
+/// Maps one of [SUPPORTED_MIME_TYPES]'s text variants to the proto's
+/// canonical "text/plain"; an image mime type (already canonical) maps
+/// to itself.
+fn canonical_mime(offered: &str) -> String {
+    if offered.starts_with("image/") {
+        offered.to_string()
+    } else {
+        "text/plain".to_string()
+    }
+}
 
 /// State shared between the background Wayland event-loop thread and
 /// the `ClipboardBackend` methods called from the daemon's clipboard
 /// poll loop (T-301). All fields use interior mutability so the
-/// backend can implement `get_text`/`set_text` on `&self`.
+/// backend can implement `get_content`/`set_content` on `&self`.
 #[derive(Default)]
 struct Shared {
     /// Most recently observed CLIPBOARD selection content, updated
     /// asynchronously whenever the compositor announces a new
     /// `selection` event on our data-control device.
-    latest_selection: Mutex<Option<String>>,
+    latest_selection: Mutex<Option<ClipboardContent>>,
     /// True once the compositor has torn down our data-control device
     /// (`finished` event, e.g. the seat went away). Once set, further
     /// calls report a clear error instead of silently no-op'ing.
@@ -143,7 +162,7 @@ impl WaylandClipboardBackend {
 }
 
 impl ClipboardBackend for WaylandClipboardBackend {
-    fn get_text(&self) -> Result<Option<String>> {
+    fn get_content(&self) -> Result<Option<ClipboardContent>> {
         if *self
             .shared
             .finished
@@ -162,7 +181,7 @@ impl ClipboardBackend for WaylandClipboardBackend {
             .clone())
     }
 
-    fn set_text(&self, text: &str) -> Result<()> {
+    fn set_content(&self, content: &ClipboardContent) -> Result<()> {
         if *self
             .shared
             .finished
@@ -174,10 +193,26 @@ impl ClipboardBackend for WaylandClipboardBackend {
             ));
         }
 
-        let content = Arc::new(text.as_bytes().to_vec());
-        let source = self.manager.create_data_source(&self.qh, content);
-        for mime in SUPPORTED_MIME_TYPES {
-            source.offer((*mime).to_string());
+        // Only offer mime types that actually match the content: an
+        // image's bytes aren't valid text, so offering the text
+        // variants alongside it (as every `set_content` used to,
+        // unconditionally, back when this only ever handled text)
+        // would let a paste-side app request "text/plain" and receive
+        // raw PNG bytes.
+        let offer_mimes: Vec<String> = if content.mime_type == "text/plain" {
+            vec![
+                "text/plain;charset=utf-8".to_string(),
+                "UTF8_STRING".to_string(),
+                "text/plain".to_string(),
+            ]
+        } else {
+            vec![content.mime_type.clone()]
+        };
+
+        let bytes = Arc::new(content.bytes.clone());
+        let source = self.manager.create_data_source(&self.qh, bytes);
+        for mime in offer_mimes {
+            source.offer(mime);
         }
         self.device.set_selection(Some(&source));
 
@@ -220,18 +255,18 @@ fn run_event_loop(
 }
 
 /// Issues the `receive` request for a just-announced data-control
-/// offer and returns the read end of the pipe the compositor will
-/// forward the offering client's data into, choosing the first of our
-/// supported mime types the offer advertised. Returns `Ok(None)` if
-/// the offer advertised none of our supported mime types (nothing to
-/// request). Deliberately does *not* read the pipe itself -- see
-/// `read_offer_pipe`'s doc comment for why that must happen off this
-/// function's caller's thread.
+/// offer and returns the chosen mime type (in [SUPPORTED_MIME_TYPES]'s
+/// preference order -- image first, T-L3) plus the read end of the
+/// pipe the compositor will forward the offering client's data into.
+/// Returns `Ok(None)` if the offer advertised none of our supported
+/// mime types (nothing to request). Deliberately does *not* read the
+/// pipe itself -- see `read_offer_pipe`'s doc comment for why that
+/// must happen off this function's caller's thread.
 fn request_offer_read(
     conn: &Connection,
     offer: &ZwlrDataControlOfferV1,
     mime_types: &[String],
-) -> Result<Option<std::os::fd::OwnedFd>> {
+) -> Result<Option<(&'static str, std::os::fd::OwnedFd)>> {
     let Some(mime) = SUPPORTED_MIME_TYPES
         .iter()
         .find(|supported| mime_types.iter().any(|m| m == *supported))
@@ -255,11 +290,14 @@ fn request_offer_read(
     // to the offering client -- has been closed).
     drop(write_fd);
 
-    Ok(Some(read_fd))
+    Ok(Some((mime, read_fd)))
 }
 
-/// Blocks reading a clipboard-offer pipe to EOF. MUST be called off
-/// the Wayland event-loop thread (`run_event_loop`'s
+/// Blocks reading a clipboard-offer pipe to EOF, returning the raw
+/// bytes (T-L3: no longer decoded as UTF-8 here -- the caller pairs
+/// these bytes with whichever mime type `request_offer_read` chose, so
+/// image bytes are never mangled through a lossy text decode). MUST be
+/// called off the Wayland event-loop thread (`run_event_loop`'s
 /// `blocking_dispatch` loop), never from inside a `Dispatch::event`
 /// callback: the offering client only writes data into this pipe in
 /// response to its *own* `send` event, which for a same-process
@@ -271,12 +309,12 @@ fn request_offer_read(
 /// event -- a self-deadlock. Running the read on its own thread lets
 /// `run_event_loop` return to `blocking_dispatch` immediately and
 /// service the pending `send` event while this thread waits on it.
-fn read_offer_pipe(read_fd: std::os::fd::OwnedFd) -> Result<String> {
+fn read_offer_pipe(read_fd: std::os::fd::OwnedFd) -> Result<Vec<u8>> {
     let mut file = std::fs::File::from(read_fd);
     let mut buf = Vec::new();
     file.read_to_end(&mut buf)
         .map_err(|e| DaemonError::Clipboard(format!("failed to read clipboard pipe: {e}")))?;
-    Ok(String::from_utf8_lossy(&buf).into_owned())
+    Ok(buf)
 }
 
 impl Dispatch<wl_registry::WlRegistry, ()> for EventLoopState {
@@ -366,16 +404,20 @@ impl Dispatch<ZwlrDataControlDeviceV1, ()> for EventLoopState {
                     .map(|d| d.0.lock().unwrap_or_else(|p| p.into_inner()).clone())
                     .unwrap_or_default();
                 match request_offer_read(conn, &offer, &mime_types) {
-                    Ok(Some(read_fd)) => {
+                    Ok(Some((mime, read_fd))) => {
                         let shared = state.shared.clone();
                         if let Err(e) = thread::Builder::new()
                             .name("wayland-clipboard-read".to_string())
                             .spawn(move || match read_offer_pipe(read_fd) {
-                                Ok(text) => {
+                                Ok(bytes) => {
                                     *shared
                                         .latest_selection
                                         .lock()
-                                        .unwrap_or_else(|p| p.into_inner()) = Some(text);
+                                        .unwrap_or_else(|p| p.into_inner()) =
+                                        Some(ClipboardContent {
+                                            mime_type: canonical_mime(mime),
+                                            bytes,
+                                        });
                                 }
                                 Err(e) => {
                                     tracing::warn!(
@@ -390,7 +432,7 @@ impl Dispatch<ZwlrDataControlDeviceV1, ()> for EventLoopState {
                     }
                     Ok(None) => {
                         // Offer advertised none of our supported mime
-                        // types -- nothing we can display as text.
+                        // types -- nothing we can display.
                         *state
                             .shared
                             .latest_selection
@@ -482,8 +524,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn supported_mime_types_prefer_utf8_plain_text_first() {
-        assert_eq!(SUPPORTED_MIME_TYPES[0], "text/plain;charset=utf-8");
+    fn supported_mime_types_prefer_image_png_first() {
+        assert_eq!(SUPPORTED_MIME_TYPES[0], "image/png");
+        assert!(SUPPORTED_MIME_TYPES.contains(&"text/plain;charset=utf-8"));
         assert!(SUPPORTED_MIME_TYPES.contains(&"UTF8_STRING"));
         assert!(SUPPORTED_MIME_TYPES.contains(&"text/plain"));
     }

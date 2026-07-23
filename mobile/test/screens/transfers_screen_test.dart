@@ -82,6 +82,7 @@ void main() {
     await tester.pumpWidget(wrapScreen(
       const TransfersScreen(),
       providers: [
+        ChangeNotifierProvider<DeviceListModel>.value(value: deviceList),
         ChangeNotifierProvider<PairingModel>.value(value: pairing),
         ChangeNotifierProvider<FileTransferModel>.value(value: fileTransfer),
       ],
@@ -134,6 +135,7 @@ void main() {
     await tester.pumpWidget(wrapScreen(
       const TransfersScreen(),
       providers: [
+        ChangeNotifierProvider<DeviceListModel>.value(value: deviceList),
         ChangeNotifierProvider<PairingModel>.value(value: pairing),
         ChangeNotifierProvider<FileTransferModel>.value(value: fileTransfer),
       ],
@@ -188,6 +190,7 @@ void main() {
     await tester.pumpWidget(wrapScreen(
       const TransfersScreen(),
       providers: [
+        ChangeNotifierProvider<DeviceListModel>.value(value: deviceList),
         ChangeNotifierProvider<PairingModel>.value(value: pairing),
         ChangeNotifierProvider<FileTransferModel>.value(value: fileTransfer),
       ],
@@ -198,6 +201,86 @@ void main() {
     expect(find.textContaining('Completed'), findsOneWidget);
 
     await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets(
+      'a history row shows the resolved peer name and a relative time '
+      '(T-X24)', (tester) async {
+    final deviceList = await buildDeviceList();
+    // The persisted entry's peerDeviceId resolves against the live
+    // paired roster -- the row must show "Pixel", not the raw id.
+    deviceList.addPairedDevice(
+        pb.Identity(deviceId: 'peer-1', deviceName: 'Pixel'));
+    final pairing = buildPairing(deviceList);
+    SharedPreferences.setMockInitialValues({
+      'connectible.transfer_history':
+          '[{"transferId":"named-1","peerDeviceId":"peer-1",'
+              '"fileName":"photo.jpg","totalBytes":4096,'
+              '"direction":"incoming","status":"completed",'
+              '"startedAtMs":1000,"finishedAtMs":2000}]',
+    });
+    final prefs = await SharedPreferences.getInstance();
+    final fileTransfer =
+        FileTransferModel(connection: _FakeConnection(), prefs: prefs);
+    addTearDown(() {
+      fileTransfer.dispose();
+      pairing.dispose();
+      deviceList.dispose();
+    });
+
+    await tester.pumpWidget(wrapScreen(
+      const TransfersScreen(),
+      providers: [
+        ChangeNotifierProvider<DeviceListModel>.value(value: deviceList),
+        ChangeNotifierProvider<PairingModel>.value(value: pairing),
+        ChangeNotifierProvider<FileTransferModel>.value(value: fileTransfer),
+      ],
+    ));
+
+    // Resolved peer name, joined with a relative-time label (finishedAtMs
+    // 2000ms is deep in the past, so this always renders the "days ago"
+    // form -- the exact count isn't the point, only that some time label
+    // is present alongside the resolved name).
+    expect(find.textContaining('Pixel'), findsOneWidget);
+    expect(find.textContaining('Pixel - '), findsOneWidget);
+    expect(find.textContaining('d ago'), findsOneWidget);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+
+  testWidgets(
+      'shows 0% (not a misleading full bar) for a restored genuine failure '
+      '(T-X33)', (tester) async {
+    final deviceList = await buildDeviceList();
+    final pairing = buildPairing(deviceList);
+    SharedPreferences.setMockInitialValues({
+      'connectible.transfer_history':
+          '[{"transferId":"broken-1","peerDeviceId":"peer-1",'
+              '"fileName":"broken.bin","totalBytes":4096,'
+              '"direction":"incoming","status":"failed",'
+              '"startedAtMs":1000,"finishedAtMs":2000}]',
+    });
+    final prefs = await SharedPreferences.getInstance();
+    final fileTransfer =
+        FileTransferModel(connection: _FakeConnection(), prefs: prefs);
+    addTearDown(() {
+      fileTransfer.dispose();
+      pairing.dispose();
+      deviceList.dispose();
+    });
+
+    await tester.pumpWidget(wrapScreen(
+      const TransfersScreen(),
+      providers: [
+        ChangeNotifierProvider<DeviceListModel>.value(value: deviceList),
+        ChangeNotifierProvider<PairingModel>.value(value: pairing),
+        ChangeNotifierProvider<FileTransferModel>.value(value: fileTransfer),
+      ],
+    ));
+
+    await tester.pumpAndSettle();
+    expect(find.text('broken.bin'), findsOneWidget);
+    expect(find.text('0%'), findsOneWidget);
   });
 
   testWidgets(
@@ -228,6 +311,7 @@ void main() {
     await tester.pumpWidget(wrapScreen(
       const TransfersScreen(),
       providers: [
+        ChangeNotifierProvider<DeviceListModel>.value(value: deviceList),
         ChangeNotifierProvider<PairingModel>.value(value: pairing),
         ChangeNotifierProvider<FileTransferModel>.value(value: fileTransfer),
       ],
@@ -283,6 +367,7 @@ void main() {
     await tester.pumpWidget(wrapScreen(
       TransfersScreen(saveFileService: saveService),
       providers: [
+        ChangeNotifierProvider<DeviceListModel>.value(value: deviceList),
         ChangeNotifierProvider<PairingModel>.value(value: pairing),
         ChangeNotifierProvider<FileTransferModel>.value(value: fileTransfer),
       ],

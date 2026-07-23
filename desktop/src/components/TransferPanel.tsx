@@ -80,12 +80,20 @@ export function TransferPanel({ transfers, devices, nearby, loading, loadError, 
   useEffect(() => {
     let cancelled = false;
     void ipc.listTransferHistory().then((result) => {
-      if (!cancelled && result.ok) setPersistedHistory(result.value);
+      if (cancelled) return;
+      if (result.ok) {
+        setPersistedHistory(result.value);
+      } else {
+        // T-X30: a failed fetch used to leave history silently empty --
+        // this-session transfers still show (the `transfers` prop is
+        // separate), but a restart-persisted history gap now says why.
+        setError(errorCodeMessage(result.error.code, t));
+      }
     });
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [t]);
 
   async function sendPaths(paths: string[]) {
     setError(null);
@@ -305,6 +313,10 @@ function TransferRow({
 }) {
   const outgoing = row.direction === "outgoing";
   const done = row.completed && !row.failed;
+  // T-X30: `remote.rs` reports a canceled transfer as failed+canceled
+  // together, so `row.failed` alone can't distinguish "the user canceled
+  // this" from "this genuinely broke" -- only the latter is danger-red.
+  const realFailure = row.failed && !row.canceled;
   // T-X16: "to whom, when" for history rows. Peer name resolves the
   // persisted device_id against the live devices list, falling back to a
   // shortened id for a since-forgotten peer; both are only present on
@@ -319,7 +331,7 @@ function TransferRow({
       <div className="flex items-center gap-3">
         <div
           className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-lg border border-line ${
-            done ? "bg-white/[0.08] text-ink" : row.failed ? "text-danger" : "bg-surface-overlay text-ink-faint"
+            done ? "bg-white/[0.08] text-ink" : realFailure ? "text-danger" : "bg-surface-overlay text-ink-faint"
           }`}
         >
           <Icon name={outgoing ? "arrow-up" : "arrow-down"} className="h-4 w-4" />
@@ -381,7 +393,10 @@ function Tie({ transfer }: { transfer: TransferProgress }) {
   const pct = transferPercent(transfer.bytesTransferred, transfer.totalBytes);
   const active = !transfer.completed && !transfer.failed;
   const done = transfer.completed && !transfer.failed;
-  const fill = transfer.failed ? "bg-danger" : "bg-paper";
+  // T-X30: canceled is terminal-but-neutral, not a failure -- only a
+  // real (non-canceled) failure gets the danger fill.
+  const realFailure = transfer.failed && !transfer.canceled;
+  const fill = realFailure ? "bg-danger" : "bg-paper";
   return (
     <div className="mt-3 flex items-center gap-2.5">
       <span className="h-2 w-2 shrink-0 rounded-full bg-paper/70" aria-hidden="true" />
@@ -402,7 +417,7 @@ function Tie({ transfer }: { transfer: TransferProgress }) {
       </div>
       <span
         className={`h-2 w-2 shrink-0 rounded-full border transition-colors ${
-          done ? "border-paper bg-paper" : transfer.failed ? "border-danger bg-transparent" : "border-line bg-transparent"
+          done ? "border-paper bg-paper" : realFailure ? "border-danger bg-transparent" : "border-line bg-transparent"
         }`}
         aria-hidden="true"
       />
@@ -420,7 +435,14 @@ function historyEntryToProgress(entry: TransferHistoryEntry): TransferProgress {
   return {
     transferId: entry.transferId,
     fileName: entry.fileName,
-    bytesTransferred: entry.totalBytes,
+    // T-X33: a genuine (non-canceled) failure never reached totalBytes,
+    // so approximating it as complete drew a full progress bar for a
+    // transfer that broke partway through. Canceled and completed both
+    // keep the totalBytes approximation -- completed because it's
+    // actually correct, canceled because "how far did it get" isn't
+    // persisted and a full bar reads as neutral once T-X30's styling
+    // fix took the danger-red off it.
+    bytesTransferred: entry.status === "failed" ? 0 : entry.totalBytes,
     totalBytes: entry.totalBytes,
     completed: entry.status === "completed",
     // T-X16: a canceled transfer is terminal, not active. Mapping it to

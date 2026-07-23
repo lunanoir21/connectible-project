@@ -5,6 +5,18 @@
     <!-- mDNS discovery needs Wi-Fi state + a multicast lock. -->
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_MULTICAST_STATE" />
+    <!--
+        Receiving-role foreground service (T-X36): keeps the inbound
+        server + mDNS advertise + heartbeat alive under Doze/OEM kills
+        while "receiving" is on. FOREGROUND_SERVICE_CONNECTED_DEVICE
+        matches the service's declared foregroundServiceType below
+        (required on API 34+); POST_NOTIFICATIONS is needed to actually
+        show the mandatory persistent notification on API 33+ (the
+        service still runs foregrounded without it, just silently).
+    -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
         android:label="Connectible"
@@ -43,6 +55,28 @@
                 <action android:name="android.service.notification.NotificationListenerService" />
             </intent-filter>
         </service>
+
+        <!--
+            Receiving-role foreground service (T-X36). Not exported:
+            only this app starts/stops it (via ReceivingServicePlugin).
+        -->
+        <service
+            android:name=".net.ReceivingForegroundService"
+            android:exported="false"
+            android:foregroundServiceType="connectedDevice" />
+
+        <!--
+            super_clipboard (Phase L, T-L7): required by the package so
+            it can hand image clipboard content to other apps via a
+            content URI on Android. See its README's "Android support"
+            section.
+        -->
+        <provider
+            android:name="com.superlist.super_native_extensions.DataProvider"
+            android:authorities="io.connectible.mobile.SuperClipboardDataProvider"
+            android:exported="true"
+            android:grantUriPermissions="true" >
+        </provider>
 
         <meta-data
             android:name="flutterEmbedding"

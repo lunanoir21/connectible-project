@@ -92,6 +92,23 @@ describe("SettingsPanel", () => {
     expect(setDownloadDir).not.toHaveBeenCalled();
   });
 
+  it("surfaces an error instead of an eternal Loading... when getDownloadDir fails (T-X30)", async () => {
+    getDownloadDir.mockReturnValueOnce(
+      Promise.resolve({ ok: false, error: { code: "INTERNAL", message: "disk error" } }),
+    );
+    render(<SettingsPanel theme="charcoal" onThemeChange={vi.fn()} deviceName="Me" appVersion="0.1.0" onOpenPairingQr={vi.fn()} clipboardSyncEnabled={false} onClipboardSyncRefresh={vi.fn()} />);
+
+    expect(
+      await screen.findByText(
+        "The daemon hit an internal error. Try again, and check the daemon logs if it persists.",
+      ),
+    ).toBeInTheDocument();
+    // The folder row stays on the loading placeholder rather than
+    // silently resolving to nothing -- the point is the error is
+    // surfaced, not that the row itself changes.
+    expect(screen.getByText("Loading...")).toBeInTheDocument();
+  });
+
   it("falls back to a placeholder when there is no device name yet, distinct from a real name", () => {
     render(<SettingsPanel theme="charcoal" onThemeChange={vi.fn()} deviceName="" appVersion="0.4.2" onOpenPairingQr={vi.fn()} clipboardSyncEnabled={false} onClipboardSyncRefresh={vi.fn()} />);
     expect(screen.getByText("-")).toBeInTheDocument();
@@ -135,6 +152,19 @@ describe("SettingsPanel", () => {
     await waitFor(() => expect(screen.getByText(/Reachable/)).toBeInTheDocument());
     expect(screen.getByText(/RTT: 8ms/)).toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("shows a genuinely 0ms RTT instead of hiding it as falsy (T-X30)", async () => {
+    daemonStatus.mockResolvedValue({
+      ok: true,
+      value: { running: true, reachable: true, rttMs: 0, errorCode: null },
+    });
+    render(<SettingsPanel theme="charcoal" onThemeChange={vi.fn()} deviceName="Me" appVersion="0.1.0" onOpenPairingQr={vi.fn()} clipboardSyncEnabled={false} onClipboardSyncRefresh={vi.fn()} />);
+
+    fireEvent.click(await screen.findByRole("button", { name: "Refresh" }));
+
+    await waitFor(() => expect(screen.getByText(/Reachable/)).toBeInTheDocument());
+    expect(screen.getByText(/RTT: 0ms/)).toBeInTheDocument();
   });
 
   it("shows a distinct error banner, mapped from ErrorCode, when the status check itself fails (T-103/T-602)", async () => {

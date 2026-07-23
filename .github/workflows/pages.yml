@@ -29,10 +29,19 @@ jobs:
       - name: Setup Pages
         uses: actions/configure-pages@v4
 
+      # T-X38: docs/archive/ holds internal audit reports and retired
+      # planning docs, not meant for the public site -- stage a filtered
+      # copy rather than pointing the upload step at docs/ directly.
+      - name: Stage public docs (excludes docs/archive/)
+        run: |
+          mkdir -p _site_docs
+          cp -r docs/. _site_docs/
+          rm -rf _site_docs/archive
+
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
         with:
-          path: ./docs
+          path: ./_site_docs
 
       - name: Deploy to GitHub Pages
         id: deployment

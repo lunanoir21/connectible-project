@@ -25,12 +25,16 @@ not add more; docs go under `docs/`.
 
 | Path | Content |
 |---|---|
-| `docs/TASKS.md` | ACTIVE roadmap (Phases G-N; G-J done) — the file you mark checkboxes in |
-| `docs/TASKS-audit-fixes.md` | Audit-fix campaign task list (Phases X1-X7) |
+| `docs/TASKS.md` | ACTIVE task file (2026-07-24-) — hidden weaknesses: silent error handling, error-message consistency (esp. mobile's raw-vs-localized gap), stale docs, UI feedback completeness. Phase names, not letters (`DOC-`/`ERR-`/`MSG-`/`UI-` task ids) |
+| `docs/TASKS-audit-fixes.md` | Audit-fix campaign task list (Phases X1-X7, all done) |
+| `docs/archive/TASKS-v1.0-completion-roadmap.md` | Superseded (2026-07-24) "Road to v1.0.0" roadmap, Phases G-N — G-M done, only N (battery, deferred) re-tracked in the active file |
+| `docs/changelog.html` | Styled GitHub Pages mirror of root `CHANGELOG.md`, linked from `docs/index.html` nav/footer — keep both updated together (see `CLAUDE.md`) |
 | `docs/context/` | This folder — AI/system context (context, file-map, decisions, conventions, known-issues, glossary, progress) |
 | `docs/RULES.md` | Engineering ground rules ("don't" list; conventions.md here is the "do" list) |
 | `docs/ARCHITECTURE.md` | Runtime architecture + sequences (pairing flow etc.) |
 | `docs/api-reference.md` | RPC/API contract documentation (daemon <-> UI <-> peers) |
+| `docs/user-guide.md` | End-user guide (Phase M) — pairing, clipboard, files, remote input, notifications, troubleshooting |
+| `docs/guide/` | Multi-page HTML rendering of `user-guide.md` for GitHub Pages (one file per topic + `index.html` overview), styled to match `docs/index.html`'s design system but each file self-contained (no shared stylesheet) |
 | `docs/tofu-trust-store.md` | Trust/TOFU security model incl. the mobile client-cert asymmetry |
 | `docs/developer-guide.md` | Contributor-facing guide |
 | `docs/design/` | Design notes/measurements (db-encryption, systemd-service, perf, ...) |
@@ -56,6 +60,7 @@ not add more; docs go under `docs/`.
 | `mobile/lib/src/state/app_providers.dart` | DI wiring of all models |
 | `mobile/lib/src/services/connectible_server.dart` | Phone's own inbound gRPC server |
 | `mobile/tool/gen_proto.sh` | Regenerates Dart stubs (generated code is NOT committed) |
+| `mobile/tool/battery_measure.sh` | Phase N (T-N1) real-device battery measurement helper -- see `docs/design/battery-measurement.md` |
 
 ## Where state lives at runtime
 

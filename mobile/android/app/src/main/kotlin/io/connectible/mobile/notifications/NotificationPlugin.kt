@@ -1,11 +1,9 @@
 package io.connectible.mobile.notifications
 
-import android.content.ComponentName
 import android.content.Context
 import android.content.Intent
-import android.os.Build
+import android.net.Uri
 import android.provider.Settings
-import android.util.Log
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
@@ -16,8 +14,9 @@ import io.flutter.plugin.common.MethodChannel
  *
  * Two channels:
  *  - `connectible/notifications` (method): `isGranted`, `openSettings`,
- *    `requestUnbind`/`requestRebind` (best-effort self-toggle via the
- *    requestUnbind/requestRebind APIs Android added for exactly this).
+ *    `openAppSettings` (T-X33 fallback when the notification-access page
+ *    itself doesn't resolve on this ROM), `cancel` (T-K4: clears a live
+ *    system notification in response to a remote dismiss command).
  *  - `connectible/notification_events` (event): drains
  *    [ConnectibleNotificationListener.events] to Dart, posted/removed and
  *    the connected/disconnected lifecycle signals.
@@ -29,7 +28,6 @@ import io.flutter.plugin.common.MethodChannel
  * a "connected" event here -> the Dart UI flips to "granted".
  */
 object NotificationPlugin {
-    private const val TAG = "NotificationPlugin"
     private const val METHOD_CHANNEL = "connectible/notifications"
     private const val EVENT_CHANNEL = "connectible/notification_events"
 
@@ -71,34 +69,17 @@ object NotificationPlugin {
                 val opened = openNotificationAccessSettings(context)
                 result.success(opened)
             }
-            "requestRebind" -> {
-                // Best-effort toggle. May throw SecurityException on some
-                // OEMs if the component isn't enabled; surface false rather
-                // than crash. The canonical path is the settings page.
-                try {
-                    val cls = ConnectibleNotificationListener::class.java
-                    val name = ComponentName(context, cls)
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                        requestRebindComponent(name)
-                    }
-                    result.success(true)
-                } catch (e: Throwable) {
-                    Log.w(TAG, "requestRebind failed: ${e.message}")
-                    result.success(false)
-                }
+            "openAppSettings" -> {
+                val opened = openGeneralAppSettings(context)
+                result.success(opened)
             }
-            "requestUnbind" -> {
-                try {
-                    val cls = ConnectibleNotificationListener::class.java
-                    val name = ComponentName(context, cls)
-                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
-                        requestUnbindComponent(name)
-                    }
-                    result.success(true)
-                } catch (e: Throwable) {
-                    Log.w(TAG, "requestUnbind failed: ${e.message}")
-                    result.success(false)
-                }
+            "cancel" -> {
+                // T-K4: a remote dismiss command for a notification we
+                // ourselves mirrored. Best-effort -- see
+                // ConnectibleNotificationListener.cancelByNotificationId's
+                // own doc for exactly when this can and can't succeed.
+                val id = call.argument<String>("notification_id").orEmpty()
+                result.success(ConnectibleNotificationListener.cancelByNotificationId(id))
             }
             else -> result.notImplemented()
         }
@@ -121,28 +102,23 @@ object NotificationPlugin {
     }
 
     /**
-     * On Android Q+, requestRebind/requestUnbind are no-ops unless the
-     * component is already enabled by the user. They are nevertheless the
-     * documented way for an app to (re)request a bind without the user
-     * leaving the app. We call them through reflection guarded by the SDK
-     * check above so older toolchains don't need the newer reference.
+     * Fallback (T-X33) for the rare ROM where
+     * [openNotificationAccessSettings]'s dedicated intent doesn't resolve:
+     * this app's own general settings page, where the user can still find
+     * notification access (usually under Permissions/App info) manually.
+     * Nearly universally available -- unlike the notification-listener
+     * page, this is a core platform intent every launcher/Settings app
+     * must support.
      */
-    private fun requestRebindComponent(name: ComponentName) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            // The static NotificationListenerService.requestRebind API was
-            // added at API 33; on older OS levels we simply can't self-bind.
-            val listener = ConnectibleNotificationListener::class.java
-            val method = listener.getMethod("requestRebind", ComponentName::class.java)
-            method.invoke(null, name)
+    private fun openGeneralAppSettings(context: Context): Boolean {
+        val intent = Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+            .setData(Uri.fromParts("package", context.packageName, null))
+            .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+        if (intent.resolveActivity(context.packageManager) == null) {
+            return false
         }
-    }
-
-    private fun requestUnbindComponent(name: ComponentName) {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-            val listener = ConnectibleNotificationListener::class.java
-            val method = listener.getMethod("requestUnbind", ComponentName::class.java)
-            method.invoke(null, name)
-        }
+        context.startActivity(intent)
+        return true
     }
 
     private fun startDraining() {

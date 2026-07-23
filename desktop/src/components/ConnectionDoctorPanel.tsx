@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { openUrl } from "@tauri-apps/plugin-opener";
-import { useT } from "../i18n";
+import { hasKey, useT, type Translate } from "../i18n";
 import { ipc } from "../lib/ipc";
 import { errorCodeMessage } from "../lib/errors";
 import type {
@@ -28,10 +28,12 @@ const CATEGORY_KEY: Record<string, TKey> = {
 // actual kebab-case ids (daemon/src/diagnostics/*.rs `id()`), not the
 // older camelCase names some stale keys were written for. An id with no
 // entry here (a new/unknown check) falls back to the daemon-provided
-// English title, so the panel never renders blank. Summaries and
-// remediation stay daemon-provided: they are dynamic (embed counts,
-// RTTs, error text) and cannot be localized client-side without the
-// daemon emitting structured message ids -- see the Done note / follow-up.
+// English title, so the panel never renders blank.
+//
+// T-X43: summary/remediation localize via `summaryKey`/`remediationKey`
+// (a stable message id the daemon attaches per result shape) interpolated
+// against `data` -- see `localized()` below. `detail` stays daemon-raw
+// (paths, error text) by design; it isn't meant to be localized.
 const CHECK_TITLE_KEY: Record<string, TKey> = {
   "daemon-version": "doctor.checks.daemonVersion",
   "download-dir-writable": "doctor.checks.downloadDirWritable",
@@ -46,6 +48,13 @@ const CHECK_TITLE_KEY: Record<string, TKey> = {
   "paired-store": "doctor.checks.pairedStore",
   "recent-errors": "doctor.checks.recentErrors",
 };
+
+// T-X43: renders `raw` localized via `key` + `data` when the key is one
+// this build recognizes; otherwise falls back to the daemon's raw English
+// verbatim, so an unknown/new message id never blanks the row.
+function localized(t: Translate, key: string, data: Record<string, string>, raw: string): string {
+  return hasKey(key) ? t(key, data) : raw;
+}
 
 function worstOf(checks: DiagnosticCheck[]): DiagnosticStatus {
   if (checks.some((c) => c.status === "error")) return "error";
@@ -90,9 +99,14 @@ export function ConnectionDoctorPanel() {
         const checks = prev.checks.map((c) => (c.id === id ? updated : c));
         return { checks, worst: worstOf(checks) };
       });
+      setError(null);
+    } else if (!res.ok) {
+      // T-X30: a failed single-check re-run used to leave the row on its
+      // stale result with no indication the re-run itself never landed.
+      setError(errorCodeMessage(res.error.code, t));
     }
     setRerunning(null);
-  }, []);
+  }, [t]);
 
   const copyReport = useCallback(async () => {
     if (!report) return;
@@ -185,6 +199,11 @@ function CheckRow({
   onRerun: () => void;
   rerunLabel: string;
 }) {
+  const t = useT();
+  const summary = localized(t, check.summaryKey, check.data, check.summary);
+  const remediation = check.remediation
+    ? localized(t, check.remediationKey, check.data, check.remediation)
+    : "";
   return (
     <div className="card px-4 py-3.5">
       <div className="flex items-start justify-between gap-3">
@@ -192,10 +211,10 @@ function CheckRow({
           <StatusBadge status={check.status} />
           <div>
             <p className="text-sm font-medium text-ink">{title}</p>
-            <p className="text-sm text-ink-muted">{check.summary}</p>
+            <p className="text-sm text-ink-muted">{summary}</p>
             {check.detail && <p className="mt-1 text-xs text-ink-faint">{check.detail}</p>}
-            {check.remediation && check.status !== "ok" && (
-              <p className="mt-1 text-xs text-ink-muted">&rarr; {check.remediation}</p>
+            {remediation && check.status !== "ok" && (
+              <p className="mt-1 text-xs text-ink-muted">&rarr; {remediation}</p>
             )}
           </div>
         </div>

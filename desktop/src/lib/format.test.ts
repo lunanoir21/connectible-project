@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formatBytes, formatRelativeTime, secondsUntil, transferPercent, truncate } from "./format";
+import { formatBytes, formatRelativeTime, transferPercent, truncate } from "./format";
 
 describe("formatBytes", () => {
   it("formats sub-KB as bytes", () => {
@@ -22,14 +22,6 @@ describe("transferPercent", () => {
     expect(transferPercent(50, 200)).toBe(25);
     expect(transferPercent(300, 200)).toBe(100);
     expect(transferPercent(-5, 200)).toBe(0);
-  });
-});
-
-describe("secondsUntil", () => {
-  it("counts down and never goes negative", () => {
-    const now = 1_000_000;
-    expect(secondsUntil(now + 30_000, now)).toBe(30);
-    expect(secondsUntil(now - 5_000, now)).toBe(0);
   });
 });
 

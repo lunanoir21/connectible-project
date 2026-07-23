@@ -32,8 +32,9 @@ interface PairingQrDialogProps {
 /// Desktop side of scan-to-pair (§QR): pre-arms a PIN with the daemon,
 /// encodes it plus this device's LAN address into a QR code, and shows
 /// both the code and the human-readable PIN (so the manual/no-camera
-/// fallback still works). Regenerates automatically when the 30s
-/// window elapses with nobody having scanned it.
+/// fallback still works). When the 30s window elapses with nobody
+/// having scanned it, the code dims and offers a manual "regenerate"
+/// button (T-X30) -- it does not renew itself.
 export function PairingQrDialog({ deviceId, deviceName, onClose, consumed }: PairingQrDialogProps) {
   const t = useT();
   const canvasRef = useRef<HTMLCanvasElement>(null);

@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:connectible_mobile/src/generated/connectible.pbgrpc.dart'
     as pb;
 import 'package:connectible_mobile/src/models/models.dart';
@@ -109,12 +111,17 @@ void main() {
       (tester) async {
     final deviceList = await buildDeviceList();
     final pairing = buildPairing(deviceList)..connected = true;
+    // T-X32: `source` is always exactly 'local' or 'remote' in production
+    // (ClipboardModel._pushLocal / .onIncoming) -- not an arbitrary peer
+    // name/id, despite the model's doc comment aspiring to one. The
+    // non-local case now renders the translated `clipboard.remoteSource`
+    // string rather than the raw sentinel.
     final clipboard = ClipboardModel(connection: _FakeConnection())
       ..clipboard = const [
         ClipboardEntry(
             content: 'hello local', capturedAtMs: 2, source: 'local'),
         ClipboardEntry(
-            content: 'hello remote', capturedAtMs: 1, source: 'Desk'),
+            content: 'hello remote', capturedAtMs: 1, source: 'remote'),
       ];
 
     await tester.pumpWidget(wrapScreen(
@@ -128,7 +135,7 @@ void main() {
     expect(find.text('hello local'), findsOneWidget);
     expect(find.text('hello remote'), findsOneWidget);
     expect(find.text('This device'), findsOneWidget);
-    expect(find.text('Desk'), findsOneWidget);
+    expect(find.text('Remote device'), findsOneWidget);
 
     final button = tester.widget<FilledButton>(find.byType(FilledButton));
     expect(button.onPressed, isNotNull,
@@ -181,6 +188,76 @@ void main() {
 
     // See the first test's comment: dispose synchronously, not via
     // addTearDown, because of ClipboardModel's real Timer.periodic.
+    await tester.pumpWidget(const SizedBox.shrink());
+    clipboard.dispose();
+    pairing.dispose();
+    deviceList.dispose();
+  });
+
+  testWidgets(
+      'shows a size message instead of a preview/copy button for an '
+      'oversized entry (T-L8)', (tester) async {
+    final deviceList = await buildDeviceList();
+    final pairing = buildPairing(deviceList)..connected = true;
+    final clipboard = ClipboardModel(connection: _FakeConnection())
+      ..clipboard = const [
+        ClipboardEntry(
+          content: '',
+          mimeType: 'image/png',
+          capturedAtMs: 1,
+          source: 'local',
+          oversized: true,
+          byteSize: 12 * 1024 * 1024,
+        ),
+      ];
+
+    await tester.pumpWidget(wrapScreen(
+      const ClipboardScreen(),
+      providers: [
+        ChangeNotifierProvider<PairingModel>.value(value: pairing),
+        ChangeNotifierProvider<ClipboardModel>.value(value: clipboard),
+      ],
+    ));
+
+    expect(find.text('Too large to sync (12.0 MB)'), findsOneWidget);
+    expect(find.byIcon(Icons.copy_outlined), findsNothing);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+    clipboard.dispose();
+    pairing.dispose();
+    deviceList.dispose();
+  });
+
+  testWidgets('renders an image clipboard entry as a thumbnail (Phase L)',
+      (tester) async {
+    final deviceList = await buildDeviceList();
+    final pairing = buildPairing(deviceList)..connected = true;
+    // 1x1 transparent PNG.
+    final pngBytes = Uint8List.fromList(base64Decode(
+        'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY'
+        '42YAAAAASUVORK5CYII='));
+    final clipboard = ClipboardModel(connection: _FakeConnection())
+      ..clipboard = [
+        ClipboardEntry(
+          content: '',
+          mimeType: 'image/png',
+          imageBytes: pngBytes,
+          capturedAtMs: 1,
+          source: 'local',
+          byteSize: pngBytes.length,
+        ),
+      ];
+
+    await tester.pumpWidget(wrapScreen(
+      const ClipboardScreen(),
+      providers: [
+        ChangeNotifierProvider<PairingModel>.value(value: pairing),
+        ChangeNotifierProvider<ClipboardModel>.value(value: clipboard),
+      ],
+    ));
+
+    expect(find.byType(Image), findsOneWidget);
+
     await tester.pumpWidget(const SizedBox.shrink());
     clipboard.dispose();
     pairing.dispose();

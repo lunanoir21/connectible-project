@@ -72,10 +72,10 @@ pub fn run() {
             commands::get_local_state,
             commands::list_devices,
             commands::disconnect_device,
+            commands::dismiss_notification,
             commands::forget_device,
             commands::set_remote_input_enabled,
             commands::set_clipboard_sync_enabled,
-            commands::ping_daemon,
             commands::run_diagnostics,
             commands::pre_arm_pairing_code,
             commands::local_addresses,
@@ -92,8 +92,6 @@ pub fn run() {
             commands::daemon_status,
             commands::start_daemon,
             commands::stop_daemon,
-            commands::check_tcp_port,
-            commands::check_tls_handshake,
         ])
         .run(tauri::generate_context!())
         .expect("error while running Connectible desktop app");

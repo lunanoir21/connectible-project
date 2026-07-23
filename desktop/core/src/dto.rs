@@ -64,19 +64,31 @@ impl From<pb::NearbyDevice> for NearbyDeviceDto {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ClipboardEntryDto {
+    /// Base64-encoded raw bytes (Phase L: content can be an image, not
+    /// just text) -- empty when `oversized` is true. The frontend
+    /// decodes text mime types back to a string, or builds a `data:`
+    /// URI directly from this field for image mime types.
     pub content: String,
     pub mime_type: String,
     pub captured_at_ms: i64,
     pub source: String,
+    /// True when the original content exceeded the daemon's cap and
+    /// was recorded for visibility only -- `content` is empty in that
+    /// case; the frontend should show `byteSize` instead of a preview.
+    pub oversized: bool,
+    pub byte_size: i64,
 }
 
 impl From<pb::ClipboardHistoryEntry> for ClipboardEntryDto {
     fn from(entry: pb::ClipboardHistoryEntry) -> Self {
+        use base64::Engine;
         Self {
-            content: entry.content,
+            content: base64::engine::general_purpose::STANDARD.encode(&entry.content),
             mime_type: entry.mime_type,
             captured_at_ms: entry.captured_at_ms,
             source: entry.source,
+            oversized: entry.oversized,
+            byte_size: entry.byte_size,
         }
     }
 }
@@ -359,6 +371,11 @@ pub struct DiagnosticCheckDto {
     /// Empty when absent.
     pub remediation: String,
     pub data: std::collections::HashMap<String, String>,
+    /// Stable message id for `summary` (T-X43); empty = no stable
+    /// template, client falls back to `summary` verbatim.
+    pub summary_key: String,
+    /// Same fallback contract as `summary_key`, for `remediation`.
+    pub remediation_key: String,
 }
 
 impl From<pb::DiagnosticCheck> for DiagnosticCheckDto {
@@ -372,6 +389,8 @@ impl From<pb::DiagnosticCheck> for DiagnosticCheckDto {
             detail: c.detail,
             remediation: c.remediation,
             data: c.data,
+            summary_key: c.summary_key,
+            remediation_key: c.remediation_key,
         }
     }
 }

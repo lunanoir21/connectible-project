@@ -30,10 +30,15 @@ export interface NearbyDevice {
 }
 
 export interface ClipboardEntry {
+  // Base64-encoded raw bytes (Phase L: may be an image); empty when
+  // `oversized` is true. Decode as text for text mime types, or use
+  // directly in a `data:` URI for image mime types.
   content: string;
   mimeType: string;
   capturedAtMs: number;
   source: string;
+  oversized: boolean;
+  byteSize: number;
 }
 
 export interface Battery {
@@ -162,6 +167,8 @@ export interface DiagnosticCheck {
   detail: string; // "" when absent
   remediation: string; // "" when absent
   data: Record<string, string>;
+  summaryKey: string; // "" = no stable template; fall back to `summary`
+  remediationKey: string; // "" = no stable template; fall back to `remediation`
 }
 
 export interface DiagnosticsReport {

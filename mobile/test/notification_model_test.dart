@@ -34,6 +34,8 @@ class _FakeListener implements NotificationListener {
       StreamController<NotificationLifecycle>.broadcast();
   final eventsController = StreamController<NotificationEvent>.broadcast();
   int openSettingsCalls = 0;
+  final cancelCalls = <String>[];
+  bool cancelResult = true;
 
   @override
   Future<NotificationAccessState> get accessState async => initialAccess;
@@ -42,6 +44,12 @@ class _FakeListener implements NotificationListener {
   Future<bool> openAccessSettings() async {
     openSettingsCalls++;
     return true;
+  }
+
+  @override
+  Future<bool> cancel(String notificationId) async {
+    cancelCalls.add(notificationId);
+    return cancelResult;
   }
 
   @override
@@ -184,5 +192,81 @@ void main() {
     final ok = await model.openAccessSettings();
     expect(ok, isTrue);
     expect(listener.openSettingsCalls, 1);
+  });
+
+  test(
+      'handleInbound cancels the matching live notification for a dismiss '
+      'frame (T-K4)', () async {
+    final connection = _FakeConnection();
+    final listener = _FakeListener();
+    final model =
+        NotificationModel(connection: connection, listener: listener);
+    addTearDown(() async {
+      model.dispose();
+      await listener.dispose();
+    });
+
+    model.handleInbound(
+        pb.NotificationData(notificationId: 'peer-said-dismiss', isDismissal: true));
+    await Future<void>.delayed(Duration.zero);
+
+    expect(listener.cancelCalls, ['peer-said-dismiss']);
+  });
+
+  test('handleInbound ignores a non-dismissal frame (mobile never receives '
+      'a new notification to post)', () async {
+    final connection = _FakeConnection();
+    final listener = _FakeListener();
+    final model =
+        NotificationModel(connection: connection, listener: listener);
+    addTearDown(() async {
+      model.dispose();
+      await listener.dispose();
+    });
+
+    model.handleInbound(pb.NotificationData(
+        notificationId: 'x', title: 'Should be ignored', isDismissal: false));
+    await Future<void>.delayed(Duration.zero);
+
+    expect(listener.cancelCalls, isEmpty);
+  });
+
+  test(
+      "canceling a notification in response to an inbound dismiss doesn't "
+      're-send it as a new outbound dismissal (T-K7 echo guard)', () async {
+    final connection = _FakeConnection();
+    final listener = _FakeListener();
+    final model =
+        NotificationModel(connection: connection, listener: listener);
+    addTearDown(() async {
+      model.dispose();
+      await listener.dispose();
+    });
+
+    // A real notification this device posted and forwarded earlier.
+    listener.eventsController.add(_event(id: 'x', title: 'Msg'));
+    await Future<void>.delayed(Duration.zero);
+    connection.sent.clear();
+
+    // The peer dismissed it; we cancel our own copy...
+    model.handleInbound(pb.NotificationData(notificationId: 'x', isDismissal: true));
+    await Future<void>.delayed(Duration.zero);
+    expect(listener.cancelCalls, ['x']);
+
+    // ...which fires the OS's own removal callback, same as a real
+    // cancelNotification() call would. Must not bounce back out.
+    listener.eventsController.add(_event(id: 'x', isRemoval: true));
+    await Future<void>.delayed(Duration.zero);
+    expect(connection.notifications, isEmpty,
+        reason: 'the echoed removal must not be re-sent as a fresh dismissal');
+
+    // A *genuine* later removal of a different, unrelated id still sends
+    // normally -- the guard is per-id and one-shot, not a global switch.
+    listener.eventsController.add(_event(id: 'y', title: 'Other'));
+    await Future<void>.delayed(Duration.zero);
+    listener.eventsController.add(_event(id: 'y', isRemoval: true));
+    await Future<void>.delayed(Duration.zero);
+    expect(connection.notifications.where((n) => n.notificationId == 'y'),
+        hasLength(2));
   });
 }

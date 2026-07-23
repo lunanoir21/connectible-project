@@ -2,6 +2,7 @@ import { describe, expect, it, vi, beforeEach } from "vitest";
 import { render, screen, fireEvent, waitFor } from "@testing-library/react";
 import { TransferPanel } from "./TransferPanel";
 import type { Device, TransferHistoryEntry, TransferProgress } from "../lib/types";
+import type { Result } from "../lib/ipc";
 
 function device(over: Partial<Device>): Device {
   return {
@@ -40,7 +41,7 @@ vi.mock("@tauri-apps/api/webview", () => ({
   }),
 }));
 const listTransferHistory = vi.fn(
-  (): Promise<{ ok: true; value: TransferHistoryEntry[] }> =>
+  (): Promise<Result<TransferHistoryEntry[]>> =>
     Promise.resolve({ ok: true, value: [] }),
 );
 vi.mock("../lib/ipc", () => ({
@@ -198,6 +199,44 @@ describe("TransferPanel", () => {
 
     await waitFor(() => expect(listTransferHistory).toHaveBeenCalled());
     expect(screen.getAllByText("doc.pdf")).toHaveLength(1);
+  });
+
+  it("surfaces an error when the persisted-history fetch fails, instead of a silently empty history (T-X30)", async () => {
+    listTransferHistory.mockResolvedValue({
+      ok: false,
+      error: { code: "INTERNAL", message: "db error" },
+    });
+    render(<TransferPanel transfers={{}} devices={[]} nearby={[]} />);
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "The daemon hit an internal error. Try again, and check the daemon logs if it persists.",
+    );
+  });
+
+  it("shows 0% (not a misleading full bar) for a restored genuine failure (T-X33)", async () => {
+    listTransferHistory.mockResolvedValue({
+      ok: true,
+      value: [historyEntry({ transferId: "f1", fileName: "broken.bin", direction: "incoming", status: "failed" })],
+    });
+    render(<TransferPanel transfers={{}} devices={[]} nearby={[]} />);
+
+    await waitFor(() => expect(screen.getByText("broken.bin")).toBeInTheDocument());
+    expect(screen.getByText("0%")).toBeInTheDocument();
+  });
+
+  // T-X30: a canceled transfer is reported as failed+canceled together
+  // (remote.rs), but is not itself a failure -- only a genuinely failed
+  // transfer gets the danger-red icon.
+  it("styles a restored canceled transfer neutrally, not as a failure (T-X30)", async () => {
+    listTransferHistory.mockResolvedValue({
+      ok: true,
+      value: [historyEntry({ transferId: "c2", fileName: "aborted2.bin", direction: "outgoing", status: "canceled" })],
+    });
+    render(<TransferPanel transfers={{}} devices={[]} nearby={[]} />);
+
+    await waitFor(() => expect(screen.getByText("aborted2.bin")).toBeInTheDocument());
+    const row = screen.getByText("aborted2.bin").closest(".card");
+    expect(row?.querySelector(".text-danger")).toBeNull();
   });
 
   // T-X16(c): a restored *canceled* transfer is terminal, not active --

@@ -1,6 +1,14 @@
 import 'package:flutter/material.dart';
 
+import '../i18n/strings.dart';
 import '../theme/app_theme.dart';
+
+/// A peer/paired device's display name, localizing the empty-name case
+/// (T-X32): the service/model layer that first observes an empty
+/// `device_name` (mDNS, a pairing request, the paired roster) has no
+/// i18n access, so it stores `''` and this is where that gets resolved.
+String displayDeviceName(String name, AppStrings s) =>
+    name.isEmpty ? s.t('devices.unknownName') : name;
 
 String monogram(String name) {
   final parts =

@@ -10,6 +10,14 @@ export type Locale = "en" | "tr";
 // checked at compile time.
 export type TranslationKey = keyof typeof en;
 
+/// Type guard for keys arriving from outside the compiled key set (e.g. a
+/// message id string over the wire from the daemon, T-X43) -- lets a
+/// caller safely fall back to server-provided text for an id this build
+/// doesn't recognize instead of rendering the raw key.
+export function hasKey(key: string): key is TranslationKey {
+  return Object.prototype.hasOwnProperty.call(en, key);
+}
+
 const DICTS: Record<Locale, Record<TranslationKey, string>> = {
   en,
   tr,

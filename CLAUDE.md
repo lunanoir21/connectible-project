@@ -13,8 +13,15 @@ here), `known-issues.md` (traps + dead ends — check before debugging),
 
 ## Active work
 
-- Roadmap: `docs/TASKS.md` (Phases G-J done, K-N pending).
-- Audit-fix campaign: `docs/TASKS-audit-fixes.md` (Phases X1-X7).
+- `docs/TASKS.md` (created 2026-07-24): hidden weaknesses — silent/
+  swallowed error handling, error-message consistency (mobile shows
+  raw exception text where desktop shows a localized one), stale
+  project docs, UI feedback completeness. Phase names, not letters.
+- The "Road to v1.0.0" roadmap (Phases G-N) is done through M and
+  archived at `docs/archive/TASKS-v1.0-completion-roadmap.md`; only
+  Phase N (real-device battery measurement) is re-tracked (still
+  parked, don't start without the owner asking).
+- Audit-fix campaign: `docs/TASKS-audit-fixes.md` (Phases X1-X7, all done).
 - Mark finished tasks `[x]` with a short Done note in the same session.
 
 ## Commands
@@ -43,6 +50,21 @@ here), `known-issues.md` (traps + dead ends — check before debugging),
   fields become `reserved`; every unbounded map/table gets a cap.
 - Report failures verbatim; document deviations/skipped checks in the
   task file — never silently.
+- `luna-space/` (repo root, gitignored) is Luna's private scratch
+  space for one-off reports she explicitly asks for (audits,
+  investigations, ...). Write requested reports there, not under
+  `docs/` and not at repo root — it's never committed or published.
+- `CHANGELOG.md` (root) and `docs/changelog.html` (its styled GitHub
+  Pages mirror, linked from `docs/index.html`'s nav/footer) must both
+  be updated **every time** a phase/feature/fix lands — not deferred
+  to release time. Add the entry (Added/Changed/Fixed/Security,
+  Keep-a-Changelog style, newest-first) under `## [Unreleased]` in
+  `CHANGELOG.md` in the same session the work lands, then mirror the
+  same entry into `docs/changelog.html`'s matching `<section
+  class="phase">` block (same monochrome style as the rest of `docs/`
+  — copy an existing phase block's markup rather than inventing new
+  CSS). Both files drifting out of sync with reality is exactly the
+  staleness this rule exists to prevent.
 
 ## Maintenance contract
 

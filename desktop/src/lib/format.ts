@@ -43,12 +43,6 @@ export function formatRelativeTime(
   return rtf.format(-deltaDay, "day");
 }
 
-// Seconds remaining until a pairing PIN expires, clamped at 0. Used by
-// the countdown in the pairing dialog.
-export function secondsUntil(expiryMs: number, nowMs: number = Date.now()): number {
-  return Math.max(0, Math.ceil((expiryMs - nowMs) / 1000));
-}
-
 export function truncate(text: string, max: number): string {
   if (text.length <= max) return text;
   return `${text.slice(0, max - 1)}...`;

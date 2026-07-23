@@ -3,21 +3,69 @@ use std::time::Duration;
 
 use crate::error::{DaemonError, Result};
 
+/// One piece of clipboard content: MIME type + raw bytes (T-L2..L4).
+/// Mirrors `connectible.proto`'s `ClipboardData` wire shape 1:1 (which
+/// already carried `mime_type` + `bytes content` from the start --
+/// "text/plain"/"image/png" per its own doc comment), so there is no
+/// separate translation step between "what the OS clipboard holds" and
+/// "what goes over the wire".
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClipboardContent {
+    pub mime_type: String,
+    pub bytes: Vec<u8>,
+}
+
+impl ClipboardContent {
+    pub fn text(text: impl Into<String>) -> Self {
+        Self {
+            mime_type: "text/plain".to_string(),
+            bytes: text.into().into_bytes(),
+        }
+    }
+
+    /// Lossy UTF-8 decode for `text/plain` content; `None` for anything
+    /// else (a caller has no business treating image bytes as text).
+    pub fn as_text(&self) -> Option<String> {
+        (self.mime_type == "text/plain")
+            .then(|| String::from_utf8_lossy(&self.bytes).into_owned())
+    }
+}
+
 /// Platform clipboard read/write, abstracted so `ClipboardSync`'s
 /// change-detection and echo-suppression logic (see mod.rs) can be
 /// tested without a real X11/Wayland session.
 pub trait ClipboardBackend: Send + Sync {
-    fn get_text(&self) -> Result<Option<String>>;
-    fn set_text(&self, text: &str) -> Result<()>;
+    fn get_content(&self) -> Result<Option<ClipboardContent>>;
+    fn set_content(&self, content: &ClipboardContent) -> Result<()>;
 }
 
-/// T-020: X11 clipboard backend using the `x11-clipboard` crate
-/// (XFixes-aware selection reads, CLIPBOARD selection writes). MVP
-/// only guarantees the `text/plain` / UTF8_STRING target, per
-/// connectible.proto's ClipboardData.mime_type comment.
+/// T-020/T-L4: X11 clipboard backend using the `x11-clipboard` crate
+/// (XFixes-aware selection reads, CLIPBOARD selection writes, INCR
+/// large-transfer chunking handled internally by the crate -- verified
+/// against its own `run.rs`/`lib.rs` source, since a 10MB image is well
+/// past the ~256KB single-property limit most X servers enforce).
+///
+/// Read side (T-L4): the crate's `load`/`store` are already MIME-
+/// agnostic at the atom level (X11 selections are just named-atom
+/// targets; "image/png" interns as a real atom exactly like
+/// "UTF8_STRING" does), so no crate limitation exists here -- this
+/// backend queries the current owner's `TARGETS` list and picks the
+/// first entry in `READ_TARGETS` it finds, preferring an image target
+/// over a text one (a screenshot copy that also offers a text
+/// fallback -- rare, but seen from some apps -- should read as the
+/// image).
 pub struct X11ClipboardBackend {
     clipboard: x11_clipboard::Clipboard,
 }
+
+/// `(X11 atom name, proto mime_type)`. The text atoms aren't
+/// themselves valid MIME strings, hence the second column.
+const READ_TARGETS: &[(&str, &str)] = &[
+    ("image/png", "image/png"),
+    ("UTF8_STRING", "text/plain"),
+    ("text/plain", "text/plain"),
+    ("STRING", "text/plain"),
+];
 
 impl X11ClipboardBackend {
     pub fn new() -> Result<Self> {
@@ -25,32 +73,85 @@ impl X11ClipboardBackend {
             .map_err(|e| DaemonError::Clipboard(format!("failed to open X11 connection: {e:?}")))?;
         Ok(Self { clipboard })
     }
-}
 
-impl ClipboardBackend for X11ClipboardBackend {
-    fn get_text(&self) -> Result<Option<String>> {
+    /// The current selection owner's advertised `TARGETS`, or empty if
+    /// there is no owner (an empty clipboard -- mirrors the old
+    /// `get_text`'s Timeout-means-empty handling).
+    fn available_targets(&self) -> Result<Vec<x11_clipboard::Atom>> {
         let atoms = &self.clipboard.getter.atoms;
         match self.clipboard.load(
             atoms.clipboard,
-            atoms.utf8_string,
+            atoms.targets,
             atoms.property,
             Duration::from_millis(200),
         ) {
-            Ok(bytes) if bytes.is_empty() => Ok(None),
-            Ok(bytes) => Ok(Some(String::from_utf8_lossy(&bytes).into_owned())),
-            // Timeout means no owner currently holds the selection (empty
-            // clipboard), which is a normal state, not an error.
-            Err(x11_clipboard::error::Error::Timeout) => Ok(None),
+            Ok(bytes) => Ok(bytes
+                .chunks_exact(4)
+                .map(|c| {
+                    x11_clipboard::Atom::from(u32::from_ne_bytes(
+                        c.try_into().expect("chunks_exact(4) yields 4-byte chunks"),
+                    ))
+                })
+                .collect()),
+            Err(x11_clipboard::error::Error::Timeout) => Ok(Vec::new()),
             Err(e) => Err(DaemonError::Clipboard(format!(
-                "clipboard read failed: {e:?}"
+                "failed to query clipboard TARGETS: {e:?}"
             ))),
         }
     }
+}
 
-    fn set_text(&self, text: &str) -> Result<()> {
+impl ClipboardBackend for X11ClipboardBackend {
+    fn get_content(&self) -> Result<Option<ClipboardContent>> {
         let atoms = &self.clipboard.getter.atoms;
+        let available = self.available_targets()?;
+        if available.is_empty() {
+            return Ok(None);
+        }
+
+        for (atom_name, mime_type) in READ_TARGETS {
+            let target = self.clipboard.getter.get_atom(atom_name).map_err(|e| {
+                DaemonError::Clipboard(format!("failed to intern atom {atom_name}: {e:?}"))
+            })?;
+            if !available.contains(&target) {
+                continue;
+            }
+            match self
+                .clipboard
+                .load(atoms.clipboard, target, atoms.property, Duration::from_millis(500))
+            {
+                Ok(bytes) if !bytes.is_empty() => {
+                    return Ok(Some(ClipboardContent {
+                        mime_type: (*mime_type).to_string(),
+                        bytes,
+                    }));
+                }
+                // Empty/timeout for this particular target -- try the
+                // next preference rather than giving up entirely.
+                Ok(_) => continue,
+                Err(x11_clipboard::error::Error::Timeout) => continue,
+                Err(e) => {
+                    return Err(DaemonError::Clipboard(format!("clipboard read failed: {e:?}")))
+                }
+            }
+        }
+        Ok(None)
+    }
+
+    fn set_content(&self, content: &ClipboardContent) -> Result<()> {
+        let atoms = &self.clipboard.getter.atoms;
+        let target = if content.mime_type == "text/plain" {
+            atoms.utf8_string
+        } else {
+            self.clipboard.getter.get_atom(&content.mime_type).map_err(|e| {
+                DaemonError::Clipboard(format!(
+                    "failed to intern atom {}: {e:?}",
+                    content.mime_type
+                ))
+            })?
+        };
         self.clipboard
-            .store(atoms.clipboard, atoms.utf8_string, text.as_bytes().to_vec())
+            .store(atoms.clipboard, target, content.bytes.clone())
             .map_err(|e| DaemonError::Clipboard(format!("clipboard write failed: {e:?}")))
     }
 }

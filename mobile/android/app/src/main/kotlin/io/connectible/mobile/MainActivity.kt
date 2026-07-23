@@ -5,6 +5,7 @@ import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.connectible.mobile.files.SaveFilePlugin
 import io.connectible.mobile.net.MulticastLockPlugin
+import io.connectible.mobile.net.ReceivingServicePlugin
 import io.connectible.mobile.notifications.NotificationPlugin
 
 class MainActivity : FlutterActivity() {
@@ -19,6 +20,10 @@ class MainActivity : FlutterActivity() {
         // the OS does not filter inbound multicast; without it discovery finds
         // nothing on most real devices. Self-contained; owns its channel.
         MulticastLockPlugin.registerWith(flutterEngine, applicationContext)
+        // Receiving-role foreground service (T-X36): keeps the inbound
+        // server + mDNS advertise + heartbeat alive under Doze/OEM kills
+        // while pairable is on. Self-contained; owns its channel.
+        ReceivingServicePlugin.registerWith(flutterEngine, applicationContext)
         // "Save to..." (T-X6): streams received files out of app-private
         // storage via ACTION_CREATE_DOCUMENT. Activity-bound because the
         // document picker round-trips through onActivityResult below.

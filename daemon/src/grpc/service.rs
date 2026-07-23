@@ -20,9 +20,11 @@ use crate::proto::connectible::v1::sync_frame::Payload;
 use crate::proto::connectible::v1::{
     local_event, ClipboardHistoryEntry as ProtoClipboardHistoryEntry, ConfirmPinRequest,
     ConfirmPinResponse, DeviceInfo, DeviceType, DisconnectDeviceRequest, DisconnectDeviceResponse,
+    DismissNotificationRequest, DismissNotificationResponse,
     Error as ProtoError, ErrorCode, ForgetDeviceRequest, ForgetDeviceResponse,
     DiagnosticCheck, GetLocalStateRequest, GetLocalStateResponse, GetPinnedFingerprintRequest,
     GetPinnedFingerprintResponse, ListDevicesRequest, ListDevicesResponse,
+    NotificationData,
     RecordFingerprintRequest, RecordFingerprintResponse, RunDiagnosticsRequest,
     RunDiagnosticsResponse,
     LocalEvent, LocalEventsRequest, NearbyDevice, PairRequest, PairResponse,
@@ -491,6 +493,8 @@ fn to_proto_history_entry(
         mime_type: entry.mime_type,
         captured_at_ms: entry.captured_at_ms,
         source: entry.source,
+        oversized: entry.oversized,
+        byte_size: entry.byte_size,
     }
 }
 
@@ -734,6 +738,33 @@ impl Connectible for ConnectibleService {
         let was_connected = self.peers.disconnect_device(&device_id);
         info!(device_id = %device_id, was_connected, "disconnect_device: local UI requested peer disconnect");
         Ok(Response::new(DisconnectDeviceResponse { was_connected }))
+    }
+
+    /// Loopback-only (T-K5): the local UI dismissed a mirrored
+    /// notification. Applies the dismissal to this daemon's own status
+    /// (so the local UI's own list reflects it immediately, exactly the
+    /// same path an incoming dismissal from a peer already takes) and
+    /// broadcasts it to every currently-connected peer, so the
+    /// originating device can clear the real system notification too.
+    async fn dismiss_notification(
+        &self,
+        request: Request<DismissNotificationRequest>,
+    ) -> Result<Response<DismissNotificationResponse>, Status> {
+        require_loopback(&request)?;
+        let notification_id = request.into_inner().notification_id;
+        let frame = NotificationData {
+            notification_id: notification_id.clone(),
+            is_dismissal: true,
+            ..Default::default()
+        };
+        self.status.apply_notification(frame.clone());
+        self.peers
+            .broadcast(SyncFrame {
+                payload: Some(Payload::Notification(frame)),
+            })
+            .await;
+        info!(notification_id = %notification_id, "dismiss_notification: local UI dismissed a mirrored notification");
+        Ok(Response::new(DismissNotificationResponse {}))
     }
 
     /// Loopback-only (T-307): the local UI's "Forget device" action --
@@ -1354,6 +1385,8 @@ fn diagnostic_to_proto(r: crate::diagnostics::CheckResult) -> DiagnosticCheck {
         detail: r.detail.unwrap_or_default(),
         remediation: r.remediation.unwrap_or_default(),
         data: r.data.into_iter().collect(),
+        summary_key: r.summary_key.unwrap_or_default().to_string(),
+        remediation_key: r.remediation_key.unwrap_or_default().to_string(),
     }
 }
 
@@ -1418,10 +1451,10 @@ mod tests {
     struct NoopClipboardBackend;
 
     impl crate::clipboard::ClipboardBackend for NoopClipboardBackend {
-        fn get_text(&self) -> Result<Option<String>> {
+        fn get_content(&self) -> Result<Option<crate::clipboard::ClipboardContent>> {
             Ok(None)
         }
-        fn set_text(&self, _text: &str) -> Result<()> {
+        fn set_content(&self, _content: &crate::clipboard::ClipboardContent) -> Result<()> {
             Ok(())
         }
     }

@@ -1,5 +1,6 @@
 import 'package:connectible_mobile/src/services/notification_listener.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// The T-B4 acceptance: the native listener surfaces posted/removed
@@ -12,6 +13,8 @@ import 'package:flutter_test/flutter_test.dart';
 /// a regression in the native contract. The non-Android short-circuit and
 /// the PlatformException->notGranted fallback are exercised too.
 void main() {
+  TestWidgetsFlutterBinding.ensureInitialized();
+
   group('decodeNotificationEvent', () {
     test('decodes a posted notification', () {
       final event = decodeNotificationEvent({
@@ -138,6 +141,51 @@ void main() {
     test('lifecycle stream is empty off-Android', () async {
       const listener = PlatformNotificationListener();
       expect(await listener.lifecycle.isEmpty, isTrue);
+    });
+  });
+
+  group('PlatformNotificationListener.openAccessSettings general-settings '
+      'fallback (T-X33)', () {
+    const channel = MethodChannel('connectible/notifications');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+
+    tearDown(() {
+      messenger.setMockMethodCallHandler(channel, null);
+    });
+
+    test('does not fall back when the notification-access page resolves',
+        () async {
+      final calls = <String>[];
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        calls.add(call.method);
+        return call.method == 'openSettings' ? true : false;
+      });
+      const listener = PlatformNotificationListener();
+
+      expect(await listener.openAccessSettings(), isTrue);
+      expect(calls, ['openSettings']);
+    });
+
+    test(
+        'falls back to openAppSettings when the notification-access page '
+        "doesn't resolve", () async {
+      final calls = <String>[];
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        calls.add(call.method);
+        return call.method == 'openAppSettings';
+      });
+      const listener = PlatformNotificationListener();
+
+      expect(await listener.openAccessSettings(), isTrue);
+      expect(calls, ['openSettings', 'openAppSettings']);
+    });
+
+    test('returns false when neither settings page resolves', () async {
+      messenger.setMockMethodCallHandler(channel, (call) async => false);
+      const listener = PlatformNotificationListener();
+
+      expect(await listener.openAccessSettings(), isFalse);
     });
   });
 }

@@ -13,7 +13,8 @@ import '../state/settings_model.dart';
 import '../theme/app_theme.dart';
 import '../widgets/device_action_sheet.dart';
 import '../widgets/pairing_sheet.dart';
-import '../widgets/ui.dart' show AppCard, EmptyState, Eyebrow, platformIcon;
+import '../widgets/ui.dart'
+    show AppCard, EmptyState, Eyebrow, displayDeviceName, monogram, platformIcon;
 import 'pair_landing_screen.dart';
 
 /// Bottom-nav tab indices in [AppShell], duplicated here (rather than
@@ -72,6 +73,15 @@ class _HomeScreenState extends State<HomeScreen> {
       _pairingModel = pairing;
       _seenErrorSeq = pairing.lastErrorSeq;
       pairing.addListener(_onPairingError);
+      // T-X36: catches up the receiving-role notification's language if
+      // it was started in English (the constructor's own auto-start, or
+      // the app's locale changed since) -- a no-op if the server isn't
+      // currently running.
+      final s = context.strings;
+      pairing.refreshReceivingNotification(
+        s.t('home.receivingTitle'),
+        s.t('home.receivingOnHint'),
+      );
     });
   }
 
@@ -85,10 +95,12 @@ class _HomeScreenState extends State<HomeScreen> {
   /// records a new one. Tapping a nearby device, "connect by address", and
   /// the automatic-reconnect fingerprint-changed security warning all reach
   /// the user this way (previously they failed with zero feedback). The
-  /// fingerprint case gets its own dedicated, translated string; everything
-  /// else surfaces the model's message. Only speaks up while Home is the
-  /// visible route -- a pairing/scan screen pushed on top surfaces its own
-  /// errors, so this avoids doubling them.
+  /// fingerprint-changed and rejected cases each get a dedicated,
+  /// translated string (T-X32); every other kind surfaces the model's own
+  /// message verbatim (arbitrary transport/peer text the model can't
+  /// localize, having no i18n access itself). Only speaks up while Home is
+  /// the visible route -- a pairing/scan screen pushed on top surfaces its
+  /// own errors, so this avoids doubling them.
   void _onPairingError() {
     final pairing = _pairingModel;
     if (pairing == null || !mounted) return;
@@ -98,9 +110,11 @@ class _HomeScreenState extends State<HomeScreen> {
     if (message == null) return;
     if (!(ModalRoute.of(context)?.isCurrent ?? true)) return;
     final s = context.strings;
-    final text = pairing.lastErrorKind == PairingErrorKind.fingerprintChanged
-        ? s.t('home.fingerprintChanged')
-        : message;
+    final text = switch (pairing.lastErrorKind) {
+      PairingErrorKind.fingerprintChanged => s.t('home.fingerprintChanged'),
+      PairingErrorKind.rejected => s.t('home.pairingRejected'),
+      PairingErrorKind.generic => message,
+    };
     ScaffoldMessenger.maybeOf(context)
         ?.showSnackBar(SnackBar(content: Text(text)));
   }
@@ -116,8 +130,13 @@ class _HomeScreenState extends State<HomeScreen> {
   /// starts/stops the ConnectibleServer + mDNS advertisement), mirroring
   /// the Settings screen's toggle so both surfaces stay in sync.
   Future<void> _setReceiving(BuildContext context, bool enabled) async {
+    final s = context.strings;
     context.read<SettingsModel>().setPairableEnabled(enabled);
-    await context.read<PairingModel>().setPairableEnabled(enabled);
+    await context.read<PairingModel>().setPairableEnabled(
+          enabled,
+          notifTitle: s.t('home.receivingTitle'),
+          notifText: s.t('home.receivingOnHint'),
+        );
   }
 
   void _openPairLanding(BuildContext context) {
@@ -146,7 +165,7 @@ class _HomeScreenState extends State<HomeScreen> {
     final pending = model.pendingPairing;
     if (ok && pending != null) {
       await PairingSheet.show(context,
-          deviceName: device.deviceName,
+          deviceName: displayDeviceName(device.deviceName, context.strings),
           pinExpiresAtMs: pending.pinExpiresAtMs);
       if (!mounted) return;
       // Unlike pair_scan_screen.dart (which navigates away right after a
@@ -231,7 +250,7 @@ class _HomeScreenState extends State<HomeScreen> {
 
     await DeviceActionSheet.show(
       context,
-      title: paired?.deviceName ?? nearby!.deviceName,
+      title: displayDeviceName(paired?.deviceName ?? nearby!.deviceName, s),
       subtitle: nearby != null
           ? _platformLabel(nearby.platform)
           : s.t('home.paired'),
@@ -244,7 +263,8 @@ class _HomeScreenState extends State<HomeScreen> {
     final s = context.strings;
     final p = context.palette;
     final rows = <MapEntry<String, String>>[
-      MapEntry(s.t('info.name'), paired?.deviceName ?? nearby!.deviceName)
+      MapEntry(s.t('info.name'),
+          displayDeviceName(paired?.deviceName ?? nearby!.deviceName, s))
     ];
     if (nearby != null) {
       rows.add(MapEntry(s.t('info.platform'), _platformLabel(nearby.platform)));
@@ -353,6 +373,7 @@ class _HomeScreenState extends State<HomeScreen> {
             strings: s,
             onTapPaired: (d) => _showActions(context, paired: d),
             onTapNearby: (d) => _onTapNearby(d),
+            discoveryError: model.lastDiscoveryError,
           ),
           const SizedBox(height: 14),
           _StatusLine(
@@ -459,7 +480,7 @@ class _Eyebrow extends StatelessWidget {
                     text: '  /  ',
                     style: TextStyle(fontSize: 11, color: p.inkGhost)),
                 TextSpan(
-                    text: deviceName.isEmpty ? 'Me' : deviceName,
+                    text: deviceName.isEmpty ? s.t('home.meFallback') : deviceName,
                     style: TextStyle(
                         fontSize: 11,
                         fontWeight: FontWeight.w600,
@@ -525,7 +546,8 @@ class _StatusLine extends StatelessWidget {
         }
       }
       statusText = activePeer != null
-          ? s.t('home.connectedToOne', {'name': activePeer.deviceName})
+          ? s.t('home.connectedToOne',
+              {'name': displayDeviceName(activePeer.deviceName, s)})
           : s.t('status.connected');
     } else if (devices.isEmpty) {
       statusText = s.t('home.notPairedYet');
@@ -618,6 +640,7 @@ class _HomeDeviceList extends StatelessWidget {
     required this.strings,
     required this.onTapPaired,
     required this.onTapNearby,
+    this.discoveryError,
   });
 
   final String deviceName;
@@ -627,6 +650,10 @@ class _HomeDeviceList extends StatelessWidget {
   final AppStrings strings;
   final ValueChanged<DeviceInfo> onTapPaired;
   final ValueChanged<NearbyDevice> onTapNearby;
+  // T-X33: DeviceListModel.lastDiscoveryError, previously tracked but
+  // never shown anywhere -- a broken mDNS sweep looked identical to
+  // "no nearby devices right now".
+  final String? discoveryError;
 
   @override
   Widget build(BuildContext context) {
@@ -691,6 +718,11 @@ class _HomeDeviceList extends StatelessWidget {
             title: s.t('devices.emptyTitle'),
             hint: s.t('devices.emptyHint'),
           ),
+        ],
+        if (discoveryError != null) ...[
+          const SizedBox(height: 12),
+          Text(s.t('home.discoveryError', {'error': discoveryError!}),
+              style: TextStyle(fontSize: 12, color: p.inkFaint)),
         ],
       ],
     );
@@ -800,7 +832,10 @@ class _PairedRow extends StatelessWidget {
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 13),
           child: Row(
             children: [
-              _DeviceAvatar(name: device.deviceName, online: device.online, palette: p),
+              _DeviceAvatar(
+                  name: displayDeviceName(device.deviceName, s),
+                  online: device.online,
+                  palette: p),
               const SizedBox(width: 12),
               Expanded(
                 child: Column(
@@ -812,7 +847,7 @@ class _PairedRow extends StatelessWidget {
                             size: 14, color: p.inkFaint),
                         const SizedBox(width: 6),
                         Flexible(
-                          child: Text(device.deviceName,
+                          child: Text(displayDeviceName(device.deviceName, s),
                               overflow: TextOverflow.ellipsis,
                               style: TextStyle(
                                   fontSize: 14,
@@ -878,7 +913,8 @@ class _NearbyRow extends StatelessWidget {
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 13),
           child: Row(
             children: [
-              _DeviceAvatar(name: device.deviceName, palette: p),
+              _DeviceAvatar(
+                  name: displayDeviceName(device.deviceName, s), palette: p),
               const SizedBox(width: 12),
               Expanded(
                 child: Row(
@@ -887,7 +923,7 @@ class _NearbyRow extends StatelessWidget {
                         size: 14, color: p.inkFaint),
                     const SizedBox(width: 6),
                     Flexible(
-                      child: Text(device.deviceName,
+                      child: Text(displayDeviceName(device.deviceName, s),
                           overflow: TextOverflow.ellipsis,
                           style: TextStyle(
                               fontSize: 14,
@@ -1050,10 +1086,11 @@ class _QuickActionsGrid extends StatelessWidget {
     // Only 4 cards: send-file/clipboard/remote-input/settings each jump
     // to a real, already-implemented tab in AppShell. A "notifications"
     // card and a "doctor" (connection diagnostics) card were deliberately
-    // left out -- neither has a mobile screen backing it (notifications
-    // forwarding isn't implemented on mobile at all, and the
-    // connection-doctor panel is desktop-only, tracked separately as
-    // T-606) -- so no visible action here is ever a dead no-op (T-106).
+    // left out -- both features are implemented (Phase B's
+    // NotificationModel; DoctorScreen), but neither has its own bottom-
+    // nav ShellTab to jump to (see ShellTab above) -- they live inside
+    // Settings instead (T-X33) -- so no visible action here is ever a
+    // dead no-op (T-106).
     final actions = <_QuickAction>[
       _QuickAction(
         id: 'send-file',
@@ -1398,11 +1435,8 @@ class _YourAddress extends StatelessWidget {
 }
 
 // ===== Shared Helpers =====
-
-String monogram(String name) {
-  final parts =
-      name.trim().split(RegExp(r'\s+')).where((s) => s.isNotEmpty).toList();
-  if (parts.isEmpty) return '?';
-  if (parts.length == 1) return parts[0].substring(0, 2).toUpperCase();
-  return (parts[0][0] + parts[parts.length - 1][0]).toUpperCase();
-}
+//
+// monogram() lives in widgets/ui.dart (T-X26): the copy that used to be
+// here did an unchecked substring(0, 2), which threw RangeError for any
+// 1-char single-word device name -- a LAN-triggerable crash, since the
+// name comes from an mDNS peer's advertised TXT record.

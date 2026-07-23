@@ -282,14 +282,17 @@ its own local history (capped at 200).
   Hyprland/Sway); a compositor supporting neither surfaces the gap as
   a missing capability flag rather than a crash or a silent
   XWayland-only fallback.
-- Clipboard sync is text-only (image support is planned).
-- Notification mirroring is display-only: dismissing a notification on
-  one device does not yet dismiss it on the other (dismiss-sync is
-  planned).
+- Clipboard sync covers text and images (`image/png`, 10MB cap; larger
+  content is recorded for visibility, not sent). Arbitrary file
+  clipboard content is out of scope -- see file transfer instead.
+- Notification mirroring is bidirectional for dismissal: clearing a
+  notification on either device clears it on the other.
 - LAN-only; no internet relay.
 
-The remaining roadmap ([docs/TASKS.md](docs/TASKS.md) Phases K-N) covers
-those two gaps plus an end-user guide and real-device battery
+See [docs/user-guide.md](docs/user-guide.md) (also published as
+[the Pages guide](https://lunanoir21.github.io/connectible-project/guide/))
+for how to use all of the above. The remaining roadmap
+([docs/TASKS.md](docs/TASKS.md) Phase N) covers real-device battery
 measurement.
 
 ## CI/CD

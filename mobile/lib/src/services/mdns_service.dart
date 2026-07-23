@@ -163,9 +163,11 @@ class MdnsService {
     final deviceId = props['device_id'];
     if (deviceId == null || deviceId.isEmpty) return null;
 
+    // T-X32: an empty/missing name is stored as '' -- this layer has no
+    // i18n access; the widget layer resolves it via displayDeviceName().
     return NearbyDevice(
       deviceId: deviceId,
-      deviceName: props['device_name'] ?? 'Unknown device',
+      deviceName: props['device_name'] ?? '',
       platform: props['platform'] ?? 'PLATFORM_UNSPECIFIED',
       host: host,
       port: srv.port,

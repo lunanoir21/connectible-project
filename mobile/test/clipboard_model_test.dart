@@ -166,5 +166,57 @@ void main() {
       expect(guard.lastAppliedHash, ClipboardEchoGuard.hashContent('b'));
       expect(guard.lastLocalHash, ClipboardEchoGuard.hashContent('b'));
     });
+
+    test('observeLocalBytes suppresses unchanged binary content (Phase L)',
+        () {
+      final guard = ClipboardEchoGuard();
+      final bytes = [1, 2, 3, 4];
+      expect(guard.observeLocalBytes(bytes), isTrue);
+      expect(guard.observeLocalBytes(bytes), isFalse);
+    });
+  });
+
+  group('ClipboardModel image handling (Phase L, T-L7)', () {
+    pb.ClipboardData inboundImage(List<int> bytes) => pb.ClipboardData(
+          mimeType: 'image/png',
+          content: bytes,
+          capturedAtMs: Int64(1000),
+          contentHash: ClipboardEchoGuard.hashBytes(bytes),
+        );
+
+    test('an inbound image frame lands in history with imageBytes set',
+        () async {
+      final model = ClipboardModel(
+        connection: _FakeConnection(),
+        pollInterval: const Duration(hours: 1),
+      );
+      addTearDown(model.dispose);
+
+      final bytes = List<int>.filled(16, 7);
+      model.handleInbound(inboundImage(bytes));
+      await Future<void>.delayed(Duration.zero);
+
+      expect(model.clipboard, hasLength(1));
+      final entry = model.clipboard.first;
+      expect(entry.mimeType, 'image/png');
+      expect(entry.isImage, isTrue);
+      expect(entry.imageBytes, bytes);
+      expect(entry.content, isEmpty);
+    });
+
+    test('an oversized inbound image is rejected outright (T-L8)', () async {
+      final model = ClipboardModel(
+        connection: _FakeConnection(),
+        pollInterval: const Duration(hours: 1),
+      );
+      addTearDown(model.dispose);
+
+      final huge = List<int>.filled(10 * 1024 * 1024 + 1, 0);
+      model.handleInbound(inboundImage(huge));
+      await Future<void>.delayed(Duration.zero);
+
+      expect(model.clipboard, isEmpty,
+          reason: 'an oversized incoming image must not be recorded at all');
+    });
   });
 }

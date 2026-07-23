@@ -61,6 +61,15 @@ class NotificationModel extends ChangeNotifier {
   final LinkedHashSet<String> _forwarded = LinkedHashSet<String>();
   static const _maxForwarded = 512;
 
+  /// Ids we just told the OS to cancel ourselves, in response to an
+  /// inbound dismiss from the peer (T-K4/T-K7 echo guard): canceling a
+  /// live notification fires [NotificationListener.events]' removal
+  /// event again, indistinguishable on its own from the user swiping it
+  /// away -- without this, that echo would be re-sent as a *new*
+  /// outbound dismissal, bouncing the same one back and forth. Same cap/
+  /// eviction shape as [_forwarded] for the same reason (RULES.md).
+  final LinkedHashSet<String> _suppressNextRemoval = LinkedHashSet<String>();
+
   Future<void> _refreshAccess() async {
     final state = await _listener.accessState;
     _setAccess(state);
@@ -75,9 +84,13 @@ class NotificationModel extends ChangeNotifier {
   void _setAccess(NotificationAccessState state) {
     if (state == _access) return;
     _access = state;
-    // A revoke invalidates every outstanding post: drop the set so a later
-    // re-grant starts clean rather than emitting stale dismissals.
-    if (state == NotificationAccessState.notGranted) _forwarded.clear();
+    // A revoke invalidates every outstanding post: drop the sets so a
+    // later re-grant starts clean rather than emitting stale dismissals
+    // or misreading a fresh post's removal as one of ours.
+    if (state == NotificationAccessState.notGranted) {
+      _forwarded.clear();
+      _suppressNextRemoval.clear();
+    }
     notifyListeners();
   }
 
@@ -85,6 +98,12 @@ class NotificationModel extends ChangeNotifier {
     if (!_connection.connected) return;
 
     if (event.isRemoval) {
+      if (_suppressNextRemoval.remove(event.id)) {
+        // Our own handleInbound()-triggered cancel() -- already synced
+        // from the peer's side, must not bounce back (T-K7).
+        _forwarded.remove(event.id);
+        return;
+      }
       // Only relay a dismissal for a post the peer actually received.
       if (!_forwarded.remove(event.id)) return;
       _send(event, dismissal: true);
@@ -95,12 +114,32 @@ class NotificationModel extends ChangeNotifier {
     _send(event, dismissal: false);
   }
 
+  /// Applies an inbound `NotificationData` frame from the paired peer
+  /// (T-K4): the only meaningful direction is a dismissal -- mobile never
+  /// receives a brand-new notification to *post* from the desktop side,
+  /// only a command to clear one it already forwarded. Best-effort: a
+  /// notification that's already gone (dismissed locally, listener
+  /// rebound since) is not an error, just a no-op.
+  void handleInbound(pb.NotificationData data) {
+    if (!data.isDismissal) return;
+    _rememberSuppressed(data.notificationId);
+    unawaited(_listener.cancel(data.notificationId));
+  }
+
   void _remember(String id) {
     // Re-inserting refreshes recency; cap by evicting the oldest.
     _forwarded.remove(id);
     _forwarded.add(id);
     while (_forwarded.length > _maxForwarded) {
       _forwarded.remove(_forwarded.first);
+    }
+  }
+
+  void _rememberSuppressed(String id) {
+    _suppressNextRemoval.remove(id);
+    _suppressNextRemoval.add(id);
+    while (_suppressNextRemoval.length > _maxForwarded) {
+      _suppressNextRemoval.remove(_suppressNextRemoval.first);
     }
   }
 

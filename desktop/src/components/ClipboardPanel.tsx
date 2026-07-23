@@ -1,13 +1,19 @@
 import { useState } from "react";
-import { writeText } from "@tauri-apps/plugin-clipboard-manager";
+import { writeText, writeImage } from "@tauri-apps/plugin-clipboard-manager";
+import { Image } from "@tauri-apps/api/image";
 import type { ClipboardEntry } from "../lib/types";
 import type { IpcError } from "../lib/ipc";
-import { formatRelativeTime, truncate } from "../lib/format";
+import { formatRelativeTime, formatBytes, truncate } from "../lib/format";
+import { base64ToBytes, base64ToText } from "../lib/base64";
 import { errorCodeMessage } from "../lib/errors";
 import { EmptyState } from "./EmptyState";
 import { ErrorState } from "./ErrorState";
 import { Icon } from "./Icon";
 import { useT, useI18n } from "../i18n";
+
+function isImageEntry(entry: ClipboardEntry): boolean {
+  return entry.mimeType.startsWith("image/");
+}
 
 interface ClipboardPanelProps {
   entries: ClipboardEntry[];
@@ -44,8 +50,14 @@ export function ClipboardPanel({ entries, loading, loadError, onRefresh }: Clipb
   const [copiedIndex, setCopiedIndex] = useState<number | null>(null);
 
   async function copyBack(entry: ClipboardEntry, index: number) {
+    if (entry.oversized) return;
     try {
-      await writeText(entry.content);
+      if (isImageEntry(entry)) {
+        const image = await Image.fromBytes(base64ToBytes(entry.content));
+        await writeImage(image);
+      } else {
+        await writeText(base64ToText(entry.content));
+      }
       setCopiedIndex(index);
       setTimeout(() => setCopiedIndex((current) => (current === index ? null : current)), 1500);
     } catch {
@@ -72,26 +84,41 @@ export function ClipboardPanel({ entries, loading, loadError, onRefresh }: Clipb
         <ul className="flex flex-col gap-2 overflow-y-auto pr-1">
           {entries.map((entry, index) => {
             const local = entry.source === "local";
+            const isImage = isImageEntry(entry);
             return (
               <li key={`${entry.capturedAtMs}-${index}`} className="group card card-hover px-4 py-3.5">
                 <div className="flex items-start justify-between gap-4">
-                  <p className="break-words font-mono text-[13px] leading-relaxed text-ink">
-                    {truncate(entry.content, 220)}
-                  </p>
-                  <button
-                    type="button"
-                    className="btn-ghost shrink-0 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
-                    onClick={() => copyBack(entry, index)}
-                  >
-                    {copiedIndex === index ? (
-                      <>
-                        <Icon name="check" className="h-4 w-4" />
-                        {t("clipboard.copied")}
-                      </>
-                    ) : (
-                      t("clipboard.copy")
-                    )}
-                  </button>
+                  {entry.oversized ? (
+                    <p className="break-words text-[13px] leading-relaxed text-ink-faint">
+                      {t("clipboard.oversized", { size: formatBytes(entry.byteSize) })}
+                    </p>
+                  ) : isImage ? (
+                    <img
+                      src={`data:${entry.mimeType};base64,${entry.content}`}
+                      alt={t("clipboard.image")}
+                      className="max-h-32 max-w-full rounded object-contain"
+                    />
+                  ) : (
+                    <p className="break-words font-mono text-[13px] leading-relaxed text-ink">
+                      {truncate(base64ToText(entry.content), 220)}
+                    </p>
+                  )}
+                  {!entry.oversized && (
+                    <button
+                      type="button"
+                      className="btn-ghost shrink-0 opacity-0 transition-opacity group-hover:opacity-100 focus-visible:opacity-100"
+                      onClick={() => copyBack(entry, index)}
+                    >
+                      {copiedIndex === index ? (
+                        <>
+                          <Icon name="check" className="h-4 w-4" />
+                          {t("clipboard.copied")}
+                        </>
+                      ) : (
+                        t("clipboard.copy")
+                      )}
+                    </button>
+                  )}
                 </div>
                 <div className="mt-2.5 flex items-center gap-2 text-[11px] text-ink-faint">
                   <span

@@ -41,9 +41,16 @@ List<SingleChildWidget> buildAppStateProviders(
   );
   final fileTransfer = FileTransferModel(
       connection: _LazyConnection(() => pairing), prefs: prefs);
+  // Constructed before `pairing` (like clipboard/fileTransfer above) so
+  // its `handleInbound` (T-K4) can be wired into PairingModel's
+  // constructor directly, rather than needing a second _LazyConnection-
+  // style indirection just for one callback.
+  final notifications =
+      NotificationModel(connection: _LazyConnection(() => pairing));
   pairing = PairingModel(
     deviceList: deviceList,
     onClipboardFrame: clipboard.handleInbound,
+    onNotificationFrame: notifications.handleInbound,
     onPrepareUpload: fileTransfer.handlePrepareUpload,
     onUploadFile: fileTransfer.handleUploadFile,
     pairableEnabled: pairableEnabled,
@@ -51,11 +58,8 @@ List<SingleChildWidget> buildAppStateProviders(
   // Constructed after `pairing` is assigned: unlike clipboard/fileTransfer
   // (which only touch the connection when a frame flows), BatteryModel
   // eagerly reports at construction, so it must not run before the lazy
-  // `pairing` target exists. NotificationModel keeps the same ordering for
-  // symmetry.
+  // `pairing` target exists.
   final battery = BatteryModel(connection: _LazyConnection(() => pairing));
-  final notifications =
-      NotificationModel(connection: _LazyConnection(() => pairing));
 
   // `create:` (not `.value`) so each provider disposes its model when
   // removed from the tree -- `.value` deliberately opts out of that,

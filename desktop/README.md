@@ -1,7 +1,7 @@
 # Connectible Desktop
 
 Tauri v2 + React 18 + TypeScript + Tailwind desktop app for Connectible.
-Dark theme, cool-toned (blue) accent -- no gold/amber anywhere.
+Dark, monochrome black/grey theme -- danger red is the only accent color.
 
 ## Layout
 

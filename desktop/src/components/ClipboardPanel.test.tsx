@@ -3,10 +3,19 @@ import { render, screen } from "@testing-library/react";
 import { ClipboardPanel } from "./ClipboardPanel";
 import type { ClipboardEntry } from "../lib/types";
 
-vi.mock("@tauri-apps/plugin-clipboard-manager", () => ({ writeText: vi.fn() }));
+vi.mock("@tauri-apps/plugin-clipboard-manager", () => ({ writeText: vi.fn(), writeImage: vi.fn() }));
 
+// Base64 of "hello world" -- entries carry raw bytes as base64 since
+// Phase L (content can be an image, not just text).
 const entries: ClipboardEntry[] = [
-  { content: "hello world", mimeType: "text/plain", capturedAtMs: Date.now(), source: "local" },
+  {
+    content: "aGVsbG8gd29ybGQ=",
+    mimeType: "text/plain",
+    capturedAtMs: Date.now(),
+    source: "local",
+    oversized: false,
+    byteSize: 11,
+  },
 ];
 
 describe("ClipboardPanel", () => {
@@ -47,5 +56,40 @@ describe("ClipboardPanel", () => {
     expect(screen.getByText("hello world")).toBeInTheDocument();
     expect(screen.queryByTestId("clipboard-list-skeleton")).not.toBeInTheDocument();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  });
+
+  it("shows a size message instead of a preview/copy button for an oversized entry (T-L8)", () => {
+    const oversized: ClipboardEntry[] = [
+      {
+        content: "",
+        mimeType: "text/plain",
+        capturedAtMs: Date.now(),
+        source: "local",
+        oversized: true,
+        byteSize: 12 * 1024 * 1024,
+      },
+    ];
+    render(<ClipboardPanel entries={oversized} />);
+    expect(screen.getByText("Too large to sync (12.0 MB)")).toBeInTheDocument();
+    expect(screen.queryByText("Copy")).not.toBeInTheDocument();
+  });
+
+  it("renders an image entry as a thumbnail, not a text preview (Phase L)", () => {
+    // 1x1 transparent PNG.
+    const png =
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=";
+    const imageEntries: ClipboardEntry[] = [
+      {
+        content: png,
+        mimeType: "image/png",
+        capturedAtMs: Date.now(),
+        source: "local",
+        oversized: false,
+        byteSize: 68,
+      },
+    ];
+    render(<ClipboardPanel entries={imageEntries} />);
+    const img = screen.getByAltText("Image") as HTMLImageElement;
+    expect(img.src).toBe(`data:image/png;base64,${png}`);
   });
 });

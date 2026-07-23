@@ -36,14 +36,19 @@ impl Check for DisplayServer {
         let x11 = std::env::var_os("DISPLAY").is_some();
         match (wayland, x11) {
             (true, _) => CheckResult::ok(self, "Wayland session")
+                .summary_key("doctor.msg.displayServer.wayland")
                 .with_data("session", "wayland"),
-            (false, true) => CheckResult::ok(self, "X11 session").with_data("session", "x11"),
+            (false, true) => CheckResult::ok(self, "X11 session")
+                .summary_key("doctor.msg.displayServer.x11")
+                .with_data("session", "x11"),
             (false, false) => CheckResult::ok(self, "No graphical session detected")
                 .warn("No display server")
+                .summary_key("doctor.msg.displayServer.none")
                 .detail("Neither WAYLAND_DISPLAY nor DISPLAY is set.")
                 .remediation(
                     "Clipboard and remote-input need a graphical session; run the daemon inside your desktop session.",
-                ),
+                )
+                .remediation_key("doctor.msg.displayServer.none.remediation"),
         }
     }
 }
@@ -68,11 +73,14 @@ impl Check for OpenerPresent {
         if found.is_empty() {
             CheckResult::ok(self, "No file opener found")
                 .warn("Cannot open received files")
+                .summary_key("doctor.msg.fileOpener.none")
                 .detail("None of xdg-open/gio/nautilus/dolphin/thunar are on PATH.")
                 .remediation("Install xdg-utils (provides xdg-open) so 'Open' works for received files.")
+                .remediation_key("doctor.msg.fileOpener.none.remediation")
         } else {
             CheckResult::ok(self, format!("Available: {}", found.join(", ")))
-                .with_data("openers", found.join(","))
+                .summary_key("doctor.msg.fileOpener.available")
+                .with_data("openers", found.join(", "))
         }
     }
 }
@@ -98,15 +106,19 @@ impl Check for InputBackend {
         let ydotool = in_path("ydotool");
         if !wayland {
             CheckResult::ok(self, "Native X11 injection")
+                .summary_key("doctor.msg.inputBackend.x11")
                 .with_data("backend", "x11-native")
         } else if ydotool {
             CheckResult::ok(self, "ydotool available (Wayland)")
+                .summary_key("doctor.msg.inputBackend.ydotool")
                 .with_data("backend", "ydotool")
         } else {
             CheckResult::ok(self, "ydotool missing")
                 .warn("Remote input may not work on Wayland")
+                .summary_key("doctor.msg.inputBackend.missing")
                 .detail("ydotool is not on PATH; Wayland input injection needs it.")
                 .remediation("Install ydotool and ensure ydotoold is running for remote input on Wayland.")
+                .remediation_key("doctor.msg.inputBackend.missing.remediation")
         }
     }
 }
@@ -139,6 +151,7 @@ impl Check for StuckPartials {
             }
         }
         let base = CheckResult::ok(self, "No leftover partial files")
+            .summary_key("doctor.msg.stuckPartials.none")
             .with_data("partials", count.to_string());
         if count == 0 {
             base
@@ -146,8 +159,10 @@ impl Check for StuckPartials {
             // Partials are how resume works, so a few are normal; flag only
             // as info that space may be reclaimable.
             base.warn(format!("{count} partial file(s) present"))
+                .summary_key("doctor.msg.stuckPartials.some")
                 .detail(format!("Resumable `.part` files in {}", dir.display()))
                 .remediation("These let interrupted transfers resume; delete them to reclaim space if unwanted.")
+                .remediation_key("doctor.msg.stuckPartials.some.remediation")
         }
     }
 }

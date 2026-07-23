@@ -169,6 +169,22 @@ pub async fn disconnect_device(state: State<'_, AppState>, device_id: String) ->
         .map_err(CmdError::from)
 }
 
+/// Dismisses a mirrored notification (T-K5): removes it from the
+/// NotificationsPanel's own list immediately and asks the daemon to
+/// relay the dismissal to the originating peer, so its real system
+/// notification clears too.
+#[tauri::command]
+pub async fn dismiss_notification(
+    state: State<'_, AppState>,
+    notification_id: String,
+) -> CmdResult<()> {
+    let client = require_client(&state).await?;
+    client
+        .dismiss_notification(&notification_id)
+        .await
+        .map_err(CmdError::from)
+}
+
 /// Permanently forgets a paired device (T-307). See
 /// `LocalDaemonClient::forget_device` for exactly what "forget" means
 /// -- the device is removed from the paired-devices store entirely, so
@@ -341,12 +357,6 @@ fn open_with_os(path: &std::path::Path) -> std::io::Result<()> {
         .map(|_| ())
 }
 
-#[tauri::command]
-pub async fn ping_daemon(state: State<'_, AppState>) -> CmdResult<i64> {
-    let client = require_client(&state).await?;
-    client.ping_rtt_ms().await.map_err(CmdError::from)
-}
-
 /// System Doctor (T-F8): runs the daemon's diagnostics engine and returns
 /// the full structured report (every check + worst-severity roll-up). Pass
 /// `check_id` to re-run a single check. The panel renders this directly.
@@ -374,31 +384,6 @@ pub async fn pre_arm_pairing_code(
     let client = require_client(&state).await?;
     client
         .pre_arm_pairing_code()
-        .await
-        .map_err(CmdError::from)
-}
-
-/// Raw TCP connect to the daemon's port, no TLS/gRPC involved -- tests
-/// only "is something listening here", independent of the daemon
-/// actually being a working Connectible daemon (Doctor panel).
-#[tauri::command]
-pub async fn check_tcp_port(port: u16) -> CmdResult<bool> {
-    let addr = format!("127.0.0.1:{port}");
-    let outcome = tokio::time::timeout(
-        std::time::Duration::from_millis(800),
-        tokio::net::TcpStream::connect(&addr),
-    )
-    .await;
-    Ok(matches!(outcome, Ok(Ok(_))))
-}
-
-/// TLS 1.3 handshake against the local daemon with no RPC call layered
-/// on top -- isolates the transport/certificate layer from the
-/// application layer for the Doctor panel's `tls-cert` check.
-#[tauri::command]
-pub async fn check_tls_handshake() -> CmdResult<()> {
-    let (data_dir, port) = daemon_endpoint();
-    connectible_desktop_core::local::tls_handshake_check(&data_dir, port)
         .await
         .map_err(CmdError::from)
 }

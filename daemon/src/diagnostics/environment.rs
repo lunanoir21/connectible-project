@@ -42,6 +42,7 @@ impl Check for DaemonVersion {
     async fn run(&self, ctx: &DiagnosticsContext) -> CheckResult {
         let version = env!("CARGO_PKG_VERSION");
         let mut result = CheckResult::ok(self, format!("connectibled {version}"))
+            .summary_key("doctor.msg.daemonVersion")
             .with_data("version", version);
         if let Some(rt) = &ctx.runtime {
             let secs = rt.started_at.elapsed().as_secs();
@@ -151,18 +152,24 @@ impl Check for DiskSpace {
             Some(free) => {
                 let human = human_bytes(free);
                 let base = CheckResult::ok(self, format!("{human} free"))
+                    .summary_key("doctor.msg.diskSpace.free")
                     .with_data("free_bytes", free.to_string())
+                    .with_data("free_human", human.clone())
                     .with_data("path", dir.display().to_string());
                 if free < LOW_DISK_BYTES {
-                    base.warn(format!("Low free space: {human}")).remediation(
-                        "Free up space on the download volume or point the download \
-                         directory at one with more room.",
-                    )
+                    base.warn(format!("Low free space: {human}"))
+                        .summary_key("doctor.msg.diskSpace.low")
+                        .remediation(
+                            "Free up space on the download volume or point the download \
+                             directory at one with more room.",
+                        )
+                        .remediation_key("doctor.msg.diskSpace.low.remediation")
                 } else {
                     base
                 }
             }
             None => CheckResult::ok(self, "Free space unknown")
+                .summary_key("doctor.msg.diskSpace.unknown")
                 .detail("Could not determine free space for the download volume.")
                 .with_data("path", dir.display().to_string()),
         }
@@ -193,27 +200,37 @@ impl Check for DbEncryptionKeySource {
     async fn run(&self, ctx: &DiagnosticsContext) -> CheckResult {
         match crate::db::keys::load_or_create_db_key(&ctx.config).await {
             Ok(key) => {
+                let summary_key = match key.source {
+                    crate::db::keys::KeySource::EnvOverride => "doctor.msg.dbKeySource.envOverride",
+                    crate::db::keys::KeySource::Keyring => "doctor.msg.dbKeySource.keyring",
+                    crate::db::keys::KeySource::FallbackFile => "doctor.msg.dbKeySource.fallbackFile",
+                };
                 let base = CheckResult::ok(self, key.source.as_str())
+                    .summary_key(summary_key)
                     .with_data("source", key.source.as_str());
                 match key.source {
                     crate::db::keys::KeySource::FallbackFile => base
                         .warn("Using the local fallback key file, not the OS keyring")
+                        .summary_key("doctor.msg.dbKeySource.fallbackFile.warn")
                         .remediation(
                             "Expected for a headless systemd service with no session bus. On a \
                              desktop session, check that a Secret Service provider (GNOME \
                              Keyring, KWallet, ...) is running if you expected keyring-backed \
                              storage instead.",
-                        ),
+                        )
+                        .remediation_key("doctor.msg.dbKeySource.fallbackFile.remediation"),
                     _ => base,
                 }
             }
             Err(e) => CheckResult::ok(self, "Could not determine or create an encryption key")
                 .error("Database encryption key unavailable")
+                .summary_key("doctor.msg.dbKeySource.unavailable")
                 .detail(e.to_string())
                 .remediation(
                     "Check permissions on the TLS directory (fallback key file location) and, \
                      if using CONNECTIBLE_DB_KEY_FILE, that the path is valid.",
-                ),
+                )
+                .remediation_key("doctor.msg.dbKeySource.unavailable.remediation"),
         }
     }
 }
@@ -230,8 +247,10 @@ fn check_dir_writable(check: &dyn Check, dir: &Path) -> CheckResult {
             Err(e) => {
                 return CheckResult::ok(check, "Directory missing and uncreatable")
                     .error("Directory missing and uncreatable")
+                    .summary_key("doctor.msg.dirWritable.missingUncreatable")
                     .detail(format!("{}: {e}", dir.display()))
                     .remediation("Check the parent path exists and the daemon has permission.")
+                    .remediation_key("doctor.msg.dirWritable.missingUncreatable.remediation")
                     .with_data("path", dir.display().to_string());
             }
         }
@@ -242,17 +261,21 @@ fn check_dir_writable(check: &dyn Check, dir: &Path) -> CheckResult {
     match std::fs::write(&probe, b"ok") {
         Ok(()) => {
             let _ = std::fs::remove_file(&probe);
-            let summary = if created {
-                "Directory created and writable"
+            let (summary, summary_key) = if created {
+                ("Directory created and writable", "doctor.msg.dirWritable.created")
             } else {
-                "Directory exists and is writable"
+                ("Directory exists and is writable", "doctor.msg.dirWritable.exists")
             };
-            CheckResult::ok(check, summary).with_data("path", dir.display().to_string())
+            CheckResult::ok(check, summary)
+                .summary_key(summary_key)
+                .with_data("path", dir.display().to_string())
         }
         Err(e) => CheckResult::ok(check, "Directory not writable")
             .error("Directory not writable")
+            .summary_key("doctor.msg.dirWritable.notWritable")
             .detail(format!("{}: {e}", dir.display()))
             .remediation("Fix the directory's ownership/permissions so the daemon can write it.")
+            .remediation_key("doctor.msg.dirWritable.notWritable.remediation")
             .with_data("path", dir.display().to_string()),
     }
 }

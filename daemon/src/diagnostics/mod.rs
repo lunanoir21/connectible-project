@@ -85,6 +85,17 @@ pub struct CheckResult {
     /// Optional structured extras for machine consumers / the UI.
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub data: BTreeMap<String, String>,
+    /// Stable machine id for the exact wording of `summary` (T-X43), so a
+    /// client can render a localized template instead of the daemon's raw
+    /// English -- interpolated against `data` for any dynamic values.
+    /// `None` when this exact result has no stable template (should not
+    /// normally happen for a known check, but a client always falls back
+    /// to `summary` verbatim so a missing key never blanks the UI).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub summary_key: Option<&'static str>,
+    /// Same fallback contract as `summary_key`, for `remediation`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remediation_key: Option<&'static str>,
 }
 
 impl CheckResult {
@@ -100,6 +111,8 @@ impl CheckResult {
             detail: None,
             remediation: None,
             data: BTreeMap::new(),
+            summary_key: None,
+            remediation_key: None,
         }
     }
 
@@ -129,6 +142,20 @@ impl CheckResult {
 
     pub fn with_data(mut self, key: &str, value: impl Into<String>) -> Self {
         self.data.insert(key.to_string(), value.into());
+        self
+    }
+
+    /// Attaches T-X43's stable message id for the current `summary`. Call
+    /// this last in each branch's chain, since `.warn()`/`.error()` change
+    /// `summary` but not this field.
+    pub fn summary_key(mut self, key: &'static str) -> Self {
+        self.summary_key = Some(key);
+        self
+    }
+
+    /// Attaches T-X43's stable message id for the current `remediation`.
+    pub fn remediation_key(mut self, key: &'static str) -> Self {
+        self.remediation_key = Some(key);
         self
     }
 }

@@ -48,6 +48,8 @@ sealed class ConnectibleException implements Exception {
         return ProtocolVersionMismatchException(message);
       case pb.ErrorCode.ERROR_CODE_RATE_LIMITED:
         return RateLimitedException(message);
+      case pb.ErrorCode.ERROR_CODE_FINGERPRINT_CHANGED:
+        return FingerprintChangedException(message);
       case pb.ErrorCode.ERROR_CODE_UNSPECIFIED:
         return UnspecifiedConnectibleException(message);
       default:
@@ -150,4 +152,18 @@ class RateLimitedException extends ConnectibleException {
   const RateLimitedException(super.message);
   @override
   pb.ErrorCode get code => pb.ErrorCode.ERROR_CODE_RATE_LIMITED;
+}
+
+/// Mirrors `ERROR_CODE_FINGERPRINT_CHANGED` (T-X33): the peer's pinned
+/// TLS certificate no longer matches what it presented -- a MITM-or-
+/// reinstall signal. Only a forget+re-pair can resolve it, so this is
+/// its own type rather than falling into [UnspecifiedConnectibleException]
+/// (previously the case, since `forCode`'s switch had no arm for this
+/// code): callers can match on it to show the same dedicated,
+/// actionable string [PairingModel] already shows for the client-side
+/// TOFU-mismatch case it detects locally (`home.fingerprintChanged`).
+class FingerprintChangedException extends ConnectibleException {
+  const FingerprintChangedException(super.message);
+  @override
+  pb.ErrorCode get code => pb.ErrorCode.ERROR_CODE_FINGERPRINT_CHANGED;
 }

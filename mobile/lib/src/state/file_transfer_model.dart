@@ -175,9 +175,21 @@ class FileTransferModel extends ChangeNotifier {
         completed: completed,
         failed: failed,
         canceled: canceled,
+        finishedAtMs: _stampFinished(id, completed || failed || canceled),
       ),
     };
     notifyListeners();
+  }
+
+  /// T-X24: client-side finish-time stamp, applied the first time a
+  /// transfer reaches a terminal state (mirrors desktop's `stampFinished`
+  /// in `useDaemon.ts`, T-X16) -- keeps the row's original stamp on later
+  /// updates instead of drifting forward, and lets the merged
+  /// live+persisted history list on `transfers_screen.dart` sort
+  /// chronologically. Returns null for a non-terminal update.
+  int? _stampFinished(String id, bool terminal) {
+    if (!terminal) return null;
+    return transfers[id]?.finishedAtMs ?? DateTime.now().millisecondsSinceEpoch;
   }
 
   /// Sends a file to the active peer over the dedicated PrepareUpload +
@@ -401,6 +413,13 @@ class FileTransferModel extends ChangeNotifier {
   /// Live upload tickets minted by [handlePrepareUpload], keyed by token.
   final Map<String, _UploadTicket> _uploadTickets = {};
 
+  /// Mirrors the daemon's own `MAX_TICKETS` (Phase I, `transfer/upload.
+  /// rs`) exactly -- a paired peer that never lets an offer finish
+  /// (dropping the stream before `UploadFile` completes) can't grow this
+  /// map without bound (T-X23). Public so a test can reference the exact
+  /// value instead of hardcoding it.
+  static const maxUploadTickets = 10000;
+
   /// Responder side of `PrepareUpload`: per file, report how many bytes we
   /// already hold (resume) and mint a token the matching `UploadFile`
   /// stream must echo. Authorization (is the sender paired?) is done one
@@ -414,6 +433,14 @@ class FileTransferModel extends ChangeNotifier {
 
     final offers = <pb.UploadFileOffer>[];
     for (final f in req.files) {
+      if (_uploadTickets.length >= maxUploadTickets) {
+        offers.add(pb.UploadFileOffer(
+          fileId: f.fileId,
+          accepted: false,
+          rejectReason: pb.ErrorCode.ERROR_CODE_INTERNAL.name,
+        ));
+        continue;
+      }
       final partPath = '${dir.path}/${partialFileName(f.fileId)}';
       final partial = File(partPath);
       final resume = await partial.exists() ? await partial.length() : 0;
@@ -458,49 +485,77 @@ class FileTransferModel extends ChangeNotifier {
     // reflects the last attempt that actually finished it.
     final startedAtMs = DateTime.now().millisecondsSinceEpoch;
 
-    await for (final part in parts) {
-      if (part.hasHeader()) {
-        final h = part.header;
-        final t = _uploadTickets[h.token];
-        if (t == null || t.fileId != h.fileId || t.sessionId != h.sessionId) {
-          throw const GrpcError.permissionDenied(
-              'unknown or mismatched upload token');
-        }
-        ticket = t;
-        token = h.token;
-        final offset = h.offsetBytes.toInt().clamp(0, t.totalBytes).toInt();
-        hashInput = sha256.startChunkedConversion(hashOut);
+    try {
+      await for (final part in parts) {
+        if (part.hasHeader()) {
+          final h = part.header;
+          final t = _uploadTickets[h.token];
+          if (t == null || t.fileId != h.fileId || t.sessionId != h.sessionId) {
+            throw const GrpcError.permissionDenied(
+                'unknown or mismatched upload token');
+          }
+          ticket = t;
+          token = h.token;
+          final offset = h.offsetBytes.toInt().clamp(0, t.totalBytes).toInt();
+          hashInput = sha256.startChunkedConversion(hashOut);
 
-        final file = File(t.partPath);
-        if (!await file.exists()) {
-          await file.create(recursive: true);
-        }
-        // Seed the digest with the bytes already on disk [0, offset),
-        // read streaming so even a big resume never buffers the file.
-        if (offset > 0) {
-          await for (final block in file.openRead(0, offset)) {
-            hashInput.add(block);
+          final file = File(t.partPath);
+          if (!await file.exists()) {
+            await file.create(recursive: true);
+          }
+          // Seed the digest with the bytes already on disk [0, offset),
+          // read streaming so even a big resume never buffers the file.
+          if (offset > 0) {
+            await for (final block in file.openRead(0, offset)) {
+              hashInput.add(block);
+            }
+          }
+          raf = await file.open(mode: FileMode.append);
+          await raf.truncate(offset);
+          await raf.setPosition(offset);
+          received = offset;
+          _emitUpload(t, received, completed: false, failed: false);
+        } else if (part.hasChunk()) {
+          if (ticket == null || raf == null || hashInput == null) {
+            throw const GrpcError.invalidArgument('chunk before header');
+          }
+          final data = part.chunk;
+          await raf.writeFrom(data);
+          hashInput.add(data);
+          received += data.length;
+          final now = DateTime.now();
+          if (now.difference(lastEmit).inMilliseconds >= 250) {
+            lastEmit = now;
+            _emitUpload(ticket, received, completed: false, failed: false);
           }
         }
-        raf = await file.open(mode: FileMode.append);
-        await raf.truncate(offset);
-        await raf.setPosition(offset);
-        received = offset;
-        _emitUpload(t, received, completed: false, failed: false);
-      } else if (part.hasChunk()) {
-        if (ticket == null || raf == null || hashInput == null) {
-          throw const GrpcError.invalidArgument('chunk before header');
-        }
-        final data = part.chunk;
-        await raf.writeFrom(data);
-        hashInput.add(data);
-        received += data.length;
-        final now = DateTime.now();
-        if (now.difference(lastEmit).inMilliseconds >= 250) {
-          lastEmit = now;
-          _emitUpload(ticket, received, completed: false, failed: false);
-        }
       }
+    } catch (e) {
+      // The stream itself errored mid-transfer (e.g. a TCP reset) --
+      // distinct from the two throws above, which are protocol violations
+      // by the sender and propagate as-is below. Close whatever's open and
+      // emit a terminal failed state so the row doesn't stay "Receiving"
+      // forever; the partial file is kept (not deleted) so a fresh
+      // PrepareUpload can still resume it, same as a clean early drop
+      // (T-X23).
+      try {
+        await raf?.close();
+      } catch (_) {
+        // best-effort
+      }
+      if (ticket != null) {
+        if (token != null) _uploadTickets.remove(token);
+        _emitUpload(ticket, received, completed: false, failed: true);
+        _recordHistory(
+          transferId: ticket.fileId,
+          fileName: ticket.fileName,
+          totalBytes: ticket.totalBytes,
+          direction: TransferDirection.incoming,
+          status: 'failed',
+          startedAtMs: startedAtMs,
+        );
+      }
+      rethrow;
     }
 
     if (ticket == null || raf == null || hashInput == null) {
@@ -598,6 +653,7 @@ class FileTransferModel extends ChangeNotifier {
         direction: TransferDirection.incoming,
         completed: completed,
         failed: failed,
+        finishedAtMs: _stampFinished(t.fileId, completed || failed),
       ),
     };
     notifyListeners();

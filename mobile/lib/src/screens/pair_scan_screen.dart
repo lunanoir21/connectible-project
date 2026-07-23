@@ -167,7 +167,13 @@ class _PairScanScreenState extends State<PairScanScreen> {
     final started = await model.startPair(device);
     if (!mounted) return;
     if (!started) {
-      _showError(model.lastError ?? s.t('pairing.incorrectPin'));
+      // T-X32: rejected gets the same translated string home_screen.dart
+      // uses; anything else falls back to the model's own message
+      // (arbitrary transport/peer text with no i18n key of its own).
+      final message = model.lastErrorKind == PairingErrorKind.rejected
+          ? s.t('home.pairingRejected')
+          : model.lastError ?? s.t('pairing.incorrectPin');
+      _showError(message);
       _handled = false;
       return;
     }
@@ -195,7 +201,7 @@ class _PairScanScreenState extends State<PairScanScreen> {
     final pending = model.pendingPairing;
     if (ok && pending != null) {
       await PairingSheet.show(context,
-          deviceName: device.deviceName,
+          deviceName: displayDeviceName(device.deviceName, context.strings),
           pinExpiresAtMs: pending.pinExpiresAtMs);
       if (!mounted) return;
       Navigator.of(context).pop();

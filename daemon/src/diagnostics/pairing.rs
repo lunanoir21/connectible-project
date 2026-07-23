@@ -29,6 +29,7 @@ impl Check for PairedStore {
         let db_path = &ctx.config.db_path;
         if !db_path.exists() {
             return CheckResult::ok(self, "No devices paired yet")
+                .summary_key("doctor.msg.pairedStore.none")
                 .detail("The device database has not been created yet.")
                 .with_data("paired", "0");
         }
@@ -48,8 +49,10 @@ impl Check for PairedStore {
             Err(e) => {
                 return CheckResult::ok(self, "Device database unreadable")
                     .error("Cannot open the device database")
+                    .summary_key("doctor.msg.pairedStore.dbUnreadable")
                     .detail(format!("{}: {e}", db_path.display()))
-                    .remediation("Check the file's permissions; if corrupt, re-pairing rebuilds it.");
+                    .remediation("Check the file's permissions; if corrupt, re-pairing rebuilds it.")
+                    .remediation_key("doctor.msg.pairedStore.dbUnreadable.remediation");
             }
         };
 
@@ -62,8 +65,10 @@ impl Check for PairedStore {
                 pool.close().await;
                 return CheckResult::ok(self, "Device table unreadable")
                     .error("Cannot read the devices table")
+                    .summary_key("doctor.msg.pairedStore.tableUnreadable")
                     .detail(e.to_string())
-                    .remediation("The database may be from an incompatible version; re-pairing rebuilds it.");
+                    .remediation("The database may be from an incompatible version; re-pairing rebuilds it.")
+                    .remediation_key("doctor.msg.pairedStore.tableUnreadable.remediation");
             }
         };
         pool.close().await;
@@ -80,19 +85,21 @@ impl Check for PairedStore {
             .count();
 
         let base = CheckResult::ok(self, format!("{total} paired, {pinned} with a pinned cert"))
+            .summary_key("doctor.msg.pairedStore.summary")
             .with_data("paired", total.to_string())
             .with_data("pinned", pinned.to_string());
 
         if total > 0 && pinned < total {
             // Not an error: pre-TOFU devices backfill on their next connect
             // (T-C5). Surface it as info so the user understands the state.
-            base.warn(format!(
-                "{} device(s) not yet cert-pinned",
-                total - pinned
-            ))
-            .remediation(
-                "These were paired before certificate pinning; they pin automatically on the next connect.",
-            )
+            let unpinned = total - pinned;
+            base.warn(format!("{unpinned} device(s) not yet cert-pinned"))
+                .summary_key("doctor.msg.pairedStore.notPinned")
+                .with_data("unpinned", unpinned.to_string())
+                .remediation(
+                    "These were paired before certificate pinning; they pin automatically on the next connect.",
+                )
+                .remediation_key("doctor.msg.pairedStore.notPinned.remediation")
         } else {
             base
         }

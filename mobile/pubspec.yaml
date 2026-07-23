@@ -36,6 +36,9 @@ dependencies:
   basic_utils: ^5.7.0
   battery_plus: ^6.0.0 # phone battery level/charging -> BatteryStatus (Phase B)
   mobile_scanner: ^7.3.0
+  # flutter/services.dart's Clipboard API is text-only; image clipboard
+  # read/write (Phase L, T-L7) needs this platform-channel package.
+  super_clipboard: ^0.9.0
 
 dev_dependencies:
   flutter_test:

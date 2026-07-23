@@ -29,6 +29,13 @@ mobile/windows
 mobile/web
 mobile/.flutter-plugins
 mobile/.flutter-plugins-dependencies
+# T-N1 battery-measurement scratch output (mobile/tool/battery_measure.sh)
+mobile/battery-results/
+
+# Luna's private scratch space for one-off reports she asks Claude to
+# produce (audits, investigations, ...) -- not project source or docs,
+# never published, never committed.
+/luna-space/
 
 # Editor / OS
 *.swp
@@ -45,9 +52,19 @@ mobile/devtools_options.yaml
 /node_modules
 
 # Claude Code / agent tooling: keep shared config (launch.json) but never
-# commit machine-local settings (permission grants) or local worktrees.
+# commit machine-local settings (permission grants), local worktrees, or
+# downloaded skill tooling (not project source).
 .claude/settings.local.json
 .claude/worktrees/
+.claude/skills/
+.agents/
+skills-lock.json
+
+# Frozen reference backups (CLAUDE.md: never touch/commit this). Not
+# gitignoring it is what lets a broad `git add -A`/`git add .` sweep an
+# 11GB+ directory of old snapshots into a commit by accident -- always
+# stage specific files/paths instead, but belt-and-suspenders here too.
+/backups/
 
 # Secrets / environment -- never commit. The daemon's runtime TLS certs
 # and DB key live under the XDG data dir (outside the repo), but guard
@@ -56,6 +73,17 @@ mobile/devtools_options.yaml
 .env.*
 *.pem
 *.key
+*.crt
 *.p12
+*.pfx
+*.jks
 *.keystore
+id_rsa*
+id_ed25519*
+id_ecdsa*
+*.mobileprovision
+google-services.json
+GoogleService-Info.plist
 secrets.*
+credentials.*
+credentials/

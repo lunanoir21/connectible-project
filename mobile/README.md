@@ -1,8 +1,10 @@
 # Connectible Mobile
 
 Flutter (Dart) mobile client for Connectible. Same monochrome black/grey
-design language, radar home screen, i18n (EN/TR), and theme switching as
-the desktop app.
+design language, plain device list (paired + nearby, no radar/orbit),
+i18n (EN/TR), and theme switching as the desktop app. Also runs its own
+gRPC/TLS server so a desktop peer can pair into the phone, not just the
+other way around.
 
 ## Architecture
 
@@ -12,23 +14,35 @@ mobile/
     main.dart                bootstrap: SharedPreferences + Providers
     src/
       app.dart               MaterialApp + theme/strings scopes
+      app_info.dart          shared app-version const
       theme/app_theme.dart    3 monochrome themes (charcoal/onyx/graphite)
       i18n/strings.dart       EN/TR dictionaries (localization resource)
       models/models.dart      UI models (device, clipboard, transfer, ...)
       state/
-        settings_model.dart   theme + locale (Provider, persisted)
-        app_model.dart         identity, mDNS, pairing, sync stream, files
+        settings_model.dart    theme + locale (Provider, persisted)
+        device_list_model.dart paired/nearby roster, mDNS discovery, TOFU pins
+        pairing_model.dart     pairing flow (both directions) + active session
+                                lifecycle (SyncStream, heartbeat, reconnect)
+        file_transfer_model.dart send/receive (PrepareUpload/UploadFile) + history
+        clipboard_model.dart    clipboard sync
+        battery_model.dart      battery level reporting
+        notification_model.dart notification mirroring (Android)
       services/
-        mdns_service.dart      _connectible._tcp discovery (T-043)
-        grpc_service.dart      gRPC client over TLS 1.3 (T-044)
-        crc32.dart             per-chunk checksum for file transfer
-      screens/                 home (radar), clipboard, transfers, remote, settings
-      widgets/                 radar painter, pairing sheet, shared UI
-      generated/               gRPC stubs (generate; see below)
+        mdns_service.dart       _connectible._tcp discovery
+        grpc_service.dart       outbound gRPC client over TLS 1.3
+        connectible_server.dart inbound gRPC/TLS server (phone as responder)
+        pairing_manager.dart    responder-side PIN issuing/verification
+        server_identity.dart    this device's TLS cert/key identity
+        notification_listener.dart native notification-access bridge
+        doctor/                 System Doctor diagnostics engine
+      screens/                  home, clipboard, transfers, remote input,
+                                 notifications, doctor, settings, pairing
+      widgets/                  pairing sheets, shared UI (monogram, icons, ...)
+      generated/                gRPC stubs (generate; see below)
 ```
 
-State management is **Provider** (per project spec). `AppModel` and
-`SettingsModel` are `ChangeNotifier`s exposed via `MultiProvider`.
+State management is **Provider**; every `*_model.dart` above is a
+`ChangeNotifier` exposed via `MultiProvider` (see `state/app_providers.dart`).
 
 ## Prerequisites
 
@@ -58,21 +72,32 @@ The app will not compile until step 3 has generated
 
 ## Design parity with desktop
 
-- Monochrome only (black/grey), near-white accent; no blue/gold.
-- Radar home: this device at the center, online paired devices on an
-  inner orbit, pairable nearby devices (platform icons) on an outer
-  orbit, animated sonar + rotating sweep painted with `CustomPainter`.
+- Monochrome only (black/grey), near-white accent; danger red is the
+  only accent color (no blue/gold).
+- Home: this device's own row, a "Paired" section, and a "Nearby"
+  section for unpaired mDNS-discovered peers -- a plain grouped-card
+  device list, not an orbit/radar visualization.
 - Settings: theme cards (charcoal/onyx/graphite) + EN/TR language, both
-  persisted via `shared_preferences`.
-- Pairing: bottom sheet with 6-digit PIN entry and a 30-second countdown
-  (T-045).
+  persisted via `shared_preferences`; notification mirroring, clipboard
+  sync, and System Doctor diagnostics all live here too.
+- Pairing: bottom sheet with 6-digit PIN entry and a 30-second
+  countdown, plus QR scan-to-pair; works in both directions (phone can
+  initiate pairing to a desktop, or a desktop/phone can pair into this
+  phone via its own inbound server).
 
-## Known limitations (MVP)
+## Known limitations
 
-- Self-signed daemon certs are accepted without pinning (see
-  `grpc_service.dart`); cert pinning is a v1.0 item, matching the daemon.
-- Notification forwarding + battery reporting (T-048a) are scaffolded in
-  the protocol but not yet surfaced in the mobile UI.
+- Self-signed peer certs are accepted on first connect and then pinned
+  (TOFU) per device_id; there is no CA-based identity verification, so
+  security rests on the PIN exchange at pairing time, not certificate
+  identity -- matching the daemon's own trust model.
+- The phone's own inbound server has no TLS-layer client-certificate
+  verification (a `dart:io` limitation on the responder side); inbound
+  frames are gated on the claimed device_id being paired instead. See
+  `ConnectibleServer.start`'s doc comment for the full account.
+- Being remotely controlled (a desktop sending input events to this
+  phone) is not implemented -- the phone can only be the controller,
+  not the controlled device.
 
 ## Integration test (daemon)
 

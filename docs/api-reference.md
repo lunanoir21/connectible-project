@@ -48,6 +48,9 @@ Inline proto comments are authoritative; this is the orientation layer.
 - `SyncStream(stream SyncFrame) -> stream SyncFrame` — bidirectional stream
   carrying clipboard, battery, notifications, and remote-input frames. Each
   `SyncFrame` is a `oneof` payload; peers send `Identity` first.
+  `NotificationData.is_dismissal=true` (title/body unset) represents a
+  dismissal of a previously forwarded notification by `notification_id`,
+  not a new post (Phase K).
 
 ### Pairing
 - `Pair(PairRequest{Identity requester}) -> PairResponse{accepted,
@@ -58,6 +61,14 @@ Inline proto comments are authoritative; this is the orientation layer.
   ConfirmPinResponse{verified, Error?}` — submits the PIN. `device_id` is
   the *requester's own* id. Wrong/expired PIN → `verified=false` + an
   `Error` (`PAIRING_REJECTED`/`PAIRING_TIMEOUT`).
+- `PreArmPairingCode(PreArmPairingCodeRequest{}) ->
+  PreArmPairingCodeResponse{pin_code, pin_expires_at_ms, Error?}` —
+  loopback-only. Generates the same 6-digit PIN a subsequent `Pair` call
+  will be checked against, so the local desktop UI can embed it in a QR
+  code up front instead of waiting for a requester to trigger `Pair`
+  first. Desktop-only today: mobile's `preArmPairingCode` handler is
+  deliberately `unimplemented` (phone-shows-QR is a documented,
+  decision-deferred asymmetry — see `docs/TASKS-audit-fixes.md` T-X39).
 
 ### File upload (Phase A — streamed, resumable)
 - `PrepareUpload(PrepareUploadRequest{Identity sender, session_id,
@@ -91,12 +102,43 @@ Inline proto comments are authoritative; this is the orientation layer.
 - `RecordFingerprint(device_id, fingerprint) -> {recorded}` — record-on-
   first-use / backfill; `recorded=false` for an unknown device.
 
+### Loopback-only (Transfer history, Phase J)
+- `RecordTransferHistory(RecordTransferHistoryRequest{TransferHistoryEntry})
+  -> RecordTransferHistoryResponse{}` — the local UI reports the outcome of
+  an outgoing send it drove itself (the daemon never observes an
+  RemoteDeviceClient-driven upload otherwise). Non-loopback →
+  `PERMISSION_DENIED`.
+- `ListTransferHistory(ListTransferHistoryRequest{limit}) ->
+  ListTransferHistoryResponse{repeated TransferHistoryEntry}` — paginated
+  read of persisted history (both directions), most recent first;
+  `limit=0` uses a daemon-chosen default. Non-loopback → `PERMISSION_DENIED`.
+  `TransferHistoryEntry.direction` ∈ {incoming,outgoing}, `.status` ∈
+  {completed,failed,canceled}.
+
+### Loopback-only (Notifications, Phase K)
+- `DismissNotification(DismissNotificationRequest{notification_id}) ->
+  DismissNotificationResponse{}` — the local UI dismissed a mirrored
+  notification. Removes it from this daemon's own notification list
+  (the same local-status path an incoming dismissal from a peer already
+  takes, so this device's own UI reflects it immediately) and
+  broadcasts an `is_dismissal=true` `NotificationData` frame to every
+  currently-connected peer over `SyncStream`, so the originating device
+  can clear the real system notification too. Broadcasting to every
+  peer (not just the one this id came from) is deliberate, mirroring
+  how the daemon already broadcasts local clipboard changes; a peer
+  that never posted this id simply has nothing to match. Non-loopback →
+  `PERMISSION_DENIED`.
+
 ### Loopback-only (System Doctor, Phase F)
 - `RunDiagnostics(RunDiagnosticsRequest{check_id}) ->
   RunDiagnosticsResponse{repeated DiagnosticCheck, worst}` — runs the shared
   diagnostics engine in-process (empty `check_id` = all). Each
   `DiagnosticCheck` has `status` ∈ {ok,warn,error}, `summary`, `detail`,
-  `remediation`, `data`. Mirrors `connectibled doctor`.
+  `remediation`, `data`, plus `summary_key`/`remediation_key` (T-X43):
+  stable message ids for client-side localization of `summary`/
+  `remediation`; empty = no stable template for that exact wording, and
+  the client falls back to the raw `summary`/`remediation` text verbatim.
+  Mirrors `connectibled doctor`.
 
 ## Error handling (`ErrorCode`)
 

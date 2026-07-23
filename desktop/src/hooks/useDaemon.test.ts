@@ -46,7 +46,14 @@ const realState: LocalState = {
   deviceName: "Living Room PC",
   capabilities: ["remote_input", "clipboard_sync"],
   clipboardHistory: [
-    { content: "hello world", mimeType: "text/plain", capturedAtMs: 1000, source: "local" },
+    {
+      content: "hello world",
+      mimeType: "text/plain",
+      capturedAtMs: 1000,
+      source: "local",
+      oversized: false,
+      byteSize: 11,
+    },
   ],
   latestBattery: { percentage: 88, isCharging: false, minutesRemaining: 200, reportedAtMs: 1000 },
   notifications: [
@@ -239,6 +246,49 @@ describe("useDaemon", () => {
       result.current.dismissPairingPrompt();
     });
     expect(result.current.pairingPrompt).toBeNull();
+  });
+
+  it("removes a notification from the list when an incoming dismiss local-event arrives (Phase K, T-K6)", async () => {
+    daemonConnected.mockResolvedValue({ ok: true, value: false });
+
+    const { result } = renderHook(() => useDaemon());
+
+    await waitFor(() => expect(onLocalEventMock).toHaveBeenCalled());
+    const handler = onLocalEventMock.mock.calls[0][0] as (event: unknown) => void;
+
+    act(() => {
+      handler({
+        kind: "notification",
+        notification: {
+          notificationId: "n1",
+          appName: "Messages",
+          title: "New message",
+          body: "Hi there",
+          postedAtMs: 1000,
+          isDismissal: false,
+        },
+      });
+    });
+    await waitFor(() =>
+      expect(result.current.notifications.some((n) => n.notificationId === "n1")).toBe(true),
+    );
+
+    act(() => {
+      handler({
+        kind: "notification",
+        notification: {
+          notificationId: "n1",
+          appName: "",
+          title: "",
+          body: "",
+          postedAtMs: 0,
+          isDismissal: true,
+        },
+      });
+    });
+    await waitFor(() =>
+      expect(result.current.notifications.some((n) => n.notificationId === "n1")).toBe(false),
+    );
   });
 
   // T-X9: the poll below is the only thing that makes a newly appeared

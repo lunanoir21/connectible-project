@@ -20,7 +20,10 @@ crate-type = ["staticlib", "cdylib", "rlib"]
 tauri-build = { version = "2", features = [] }
 
 [dependencies]
-tauri = { version = "2", features = ["tray-icon"] }
+# image-png: lets the frontend build an Image from PNG bytes
+# (Image.fromBytes) to writeImage() clipboard entries synced from a
+# peer (Phase L).
+tauri = { version = "2", features = ["tray-icon", "image-png"] }
 tauri-plugin-dialog = "2"
 tauri-plugin-clipboard-manager = "2"
 tauri-plugin-opener = "2"

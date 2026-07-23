@@ -6,6 +6,7 @@ import 'package:provider/provider.dart';
 
 import '../models/models.dart';
 import '../services/save_file_service.dart';
+import '../state/device_list_model.dart';
 import '../state/file_transfer_model.dart';
 import '../state/pairing_model.dart';
 import '../i18n/strings.dart';
@@ -106,7 +107,13 @@ class TransfersScreen extends StatelessWidget {
     final persistedRows = model.history
         .where((h) => !liveHistoryIds.contains(h.transferId))
         .map(_historyEntryToProgress);
-    final history = [...liveHistory, ...persistedRows];
+    // T-X24: sort by finish time descending (most recent first) instead
+    // of insertion order -- live rows carry a client-stamped
+    // `finishedAtMs` (FileTransferModel._stampFinished), persisted rows
+    // carry the one recorded at the time, so both directions order
+    // coherently once merged.
+    final history = [...liveHistory, ...persistedRows]
+      ..sort((a, b) => (b.finishedAtMs ?? 0).compareTo(a.finishedAtMs ?? 0));
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -177,12 +184,23 @@ class TransfersScreen extends StatelessWidget {
     return TransferProgress(
       transferId: h.transferId,
       fileName: h.fileName,
-      bytesTransferred: h.totalBytes,
+      // T-X33: a genuine (non-canceled) failure never reached totalBytes,
+      // so approximating it as complete drew a full progress bar for a
+      // transfer that broke partway through. Canceled and completed both
+      // keep the totalBytes approximation -- completed because it's
+      // actually correct, canceled because "how far did it get" isn't
+      // persisted.
+      bytesTransferred: h.status == 'failed' ? 0 : h.totalBytes,
       totalBytes: h.totalBytes,
       direction: h.direction,
       completed: h.status == 'completed',
       failed: h.status == 'failed' || h.status == 'canceled',
       canceled: h.status == 'canceled',
+      finishedAtMs: h.finishedAtMs,
+      // T-X24: '' means "recorded before a peer id was ever tracked" --
+      // treat the same as absent rather than resolving/rendering an
+      // empty-string peer.
+      peerDeviceId: h.peerDeviceId.isEmpty ? null : h.peerDeviceId,
     );
   }
 }
@@ -274,6 +292,24 @@ class _TransferTile extends StatelessWidget {
     final outgoing = t.direction == TransferDirection.outgoing;
     final done = t.completed && !t.failed;
 
+    // T-X24: "to/from whom, when" for history rows. Peer name resolves
+    // the persisted device_id against the live paired roster, falling
+    // back to a shortened id for a since-forgotten peer; both are only
+    // present on rows carrying a peer id / finish stamp (a bare active
+    // row has neither), matching desktop's T-X16 meta line.
+    final peerId = t.peerDeviceId;
+    final peerName = peerId == null
+        ? null
+        : context
+                .watch<DeviceListModel>()
+                .knownDevices()
+                .where((d) => d.deviceId == peerId)
+                .firstOrNull
+                ?.deviceName ??
+            _shortDeviceId(peerId);
+    final timeLabel =
+        t.finishedAtMs != null ? _formatRelativeTime(t.finishedAtMs!, s) : null;
+
     return AppCard(
       child: Column(
         children: [
@@ -309,6 +345,15 @@ class _TransferTile extends StatelessWidget {
                             color: p.ink)),
                     Text('$statusLabel - $bytesLabel',
                         style: TextStyle(fontSize: 11, color: p.inkFaint)),
+                    if (peerName != null || timeLabel != null)
+                      Text(
+                        [peerName, timeLabel]
+                            .where((x) => x != null)
+                            .join(' - '),
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                        style: TextStyle(fontSize: 11, color: p.inkFaint),
+                      ),
                   ],
                 ),
               ),
@@ -398,6 +443,28 @@ class _Tie extends StatelessWidget {
       ],
     );
   }
+}
+
+// First 8 chars of a device id, for a peer that is no longer in the live
+// paired roster (forgotten/offline) so a history row still shows
+// *something* identifying rather than a blank (T-X24, mirrors desktop's
+// `shortDeviceId` in TransferPanel.tsx).
+String _shortDeviceId(String id) => id.length <= 8 ? id : '${id.substring(0, 8)}...';
+
+// Hand-rolled relative time (T-X24): mirrors desktop's formatRelativeTime
+// (T-X15) granularity without pulling in the `intl` package for one
+// label. `nowMs` is a parameter (not `DateTime.now()` inline) so a test
+// can pin it.
+String _formatRelativeTime(int epochMs, AppStrings s, {int? nowMs}) {
+  final now = nowMs ?? DateTime.now().millisecondsSinceEpoch;
+  final deltaSec = ((now - epochMs) / 1000).round();
+  if (deltaSec < 60) return s.t('transfers.timeJustNow');
+  final deltaMin = (deltaSec / 60).round();
+  if (deltaMin < 60) return s.t('transfers.timeMinutesAgo', {'n': deltaMin});
+  final deltaHr = (deltaMin / 60).round();
+  if (deltaHr < 24) return s.t('transfers.timeHoursAgo', {'n': deltaHr});
+  final deltaDay = (deltaHr / 24).round();
+  return s.t('transfers.timeDaysAgo', {'n': deltaDay});
 }
 
 class _Star extends StatelessWidget {

@@ -65,8 +65,10 @@ abstract class NotificationListener {
   Future<NotificationAccessState> get accessState;
 
   /// Best-effort deep link to the system Notification-access settings.
-  /// Returns false on ROMs that lack the page (caller falls back to the
-  /// generic settings screen).
+  /// Falls back to this app's general settings page (T-X33) if that
+  /// specific page doesn't resolve on this ROM, so the call always
+  /// reaches *some* settings screen when one exists at all. Returns
+  /// false only if neither resolved.
   Future<bool> openAccessSettings();
 
   /// Hot stream of grant/connect/disconnect lifecycle changes. Emits an
@@ -77,6 +79,14 @@ abstract class NotificationListener {
   /// Hot stream of notification events (post/update/remove). Emits nothing
   /// until access is granted and the listener is bound.
   Stream<NotificationEvent> get events;
+
+  /// Best-effort: clears the live system notification matching
+  /// [notificationId] (T-K4), in response to a dismiss command that
+  /// arrived from the paired peer. Returns false (not an error) if the
+  /// notification is no longer tracked (already dismissed locally,
+  /// system restarted the listener, ...) -- the caller has nothing
+  /// actionable to do either way.
+  Future<bool> cancel(String notificationId);
 }
 
 const _methodChannel = MethodChannel('connectible/notifications');
@@ -100,7 +110,11 @@ class PlatformNotificationListener implements NotificationListener {
   @override
   Future<bool> openAccessSettings() async {
     if (!isAndroid) return false;
-    return _invokeBool('openSettings');
+    if (await _invokeBool('openSettings')) return true;
+    // T-X33: some OEM ROMs lack the dedicated notification-access page;
+    // fall back to this app's own general settings, where the user can
+    // still find the permission manually.
+    return _invokeBool('openAppSettings');
   }
 
   @override
@@ -122,9 +136,15 @@ class PlatformNotificationListener implements NotificationListener {
         .handleError((_) {});
   }
 
-  Future<bool> _invokeBool(String method) async {
+  @override
+  Future<bool> cancel(String notificationId) async {
+    if (!isAndroid) return false;
+    return _invokeBool('cancel', {'notification_id': notificationId});
+  }
+
+  Future<bool> _invokeBool(String method, [Map<String, dynamic>? arguments]) async {
     try {
-      final result = await _methodChannel.invokeMethod<bool>(method);
+      final result = await _methodChannel.invokeMethod<bool>(method, arguments);
       return result ?? false;
     } on PlatformException {
       return false;

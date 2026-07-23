@@ -1,7 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
 import { NotificationsPanel } from "./NotificationsPanel";
 import type { Notification } from "../lib/types";
+
+const dismissNotification = vi.fn();
+vi.mock("../lib/ipc", () => ({
+  ipc: { dismissNotification: (...args: unknown[]) => dismissNotification(...args) },
+}));
 
 const notifications: Notification[] = [
   {
@@ -50,5 +55,12 @@ describe("NotificationsPanel", () => {
     expect(screen.getByText("Messages")).toBeInTheDocument();
     expect(screen.getByText("New message")).toBeInTheDocument();
     expect(screen.queryByTestId("notifications-list-skeleton")).not.toBeInTheDocument();
+  });
+
+  it("dismissing a notification calls ipc.dismissNotification with its id (T-K5)", () => {
+    dismissNotification.mockReset();
+    render(<NotificationsPanel notifications={notifications} />);
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+    expect(dismissNotification).toHaveBeenCalledWith("n1");
   });
 });

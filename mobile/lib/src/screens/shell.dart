@@ -8,6 +8,7 @@ import '../state/pairing_model.dart';
 import '../i18n/strings.dart';
 import '../theme/app_theme.dart';
 import '../widgets/responder_pairing_sheet.dart';
+import '../widgets/ui.dart' show displayDeviceName;
 import 'clipboard_screen.dart';
 import 'home_screen.dart';
 import 'remote_input_screen.dart';
@@ -86,7 +87,8 @@ class _AppShellState extends State<AppShell>
     await ResponderPairingSheet.show(
       context,
       requesterDeviceId: e.requesterDeviceId,
-      requesterDeviceName: e.requesterDeviceName,
+      requesterDeviceName:
+          displayDeviceName(e.requesterDeviceName, context.strings),
       pinCode: e.pinCode,
       pinExpiresAtMs: e.pinExpiresAtMs,
     );
@@ -273,11 +275,14 @@ class _ConnChip extends StatelessWidget {
   Widget build(BuildContext context) {
     final p = context.palette;
     final s = context.strings;
+    // Idle (not connected, no reconnect pending) is a real steady state --
+    // e.g. a fresh install with nothing paired yet -- not a transient
+    // "Connecting" (T-X25).
     final label = connected
         ? s.t('status.connected')
         : reconnecting
             ? s.t('status.reconnecting')
-            : s.t('status.connecting');
+            : s.t('status.idle');
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
       decoration: BoxDecoration(

@@ -56,6 +56,8 @@ class _FakeListener implements NotificationListener {
   Stream<NotificationLifecycle> get lifecycle => const Stream.empty();
   @override
   Stream<NotificationEvent> get events => const Stream.empty();
+  @override
+  Future<bool> cancel(String notificationId) async => false;
 }
 
 void main() {

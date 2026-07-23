@@ -83,4 +83,40 @@ void main() {
 
     await tester.pumpWidget(const SizedBox.shrink());
   });
+
+  testWidgets(
+      'idle connection chip (fresh, never connected) reads "Not connected", '
+      'not "Connecting" (T-X25)', (tester) async {
+    SharedPreferences.setMockInitialValues({});
+    final prefs = await SharedPreferences.getInstance();
+
+    await tester.pumpWidget(
+      MultiProvider(
+        providers: [
+          ChangeNotifierProvider.value(value: SettingsModel(prefs)),
+          ...buildAppStateProviders(prefs,
+              deviceName: 'Test Phone', pairableEnabled: false),
+        ],
+        child: MaterialApp(
+          builder: (context, navigatorChild) => AppPaletteScope(
+            palette: AppPalette.charcoal,
+            child: AppStringsScope(
+              strings: const AppStrings(AppLocale.en),
+              child: navigatorChild ?? const SizedBox.shrink(),
+            ),
+          ),
+          home: const AppShell(),
+        ),
+      ),
+    );
+    await tester.pump();
+
+    // A fresh PairingModel is neither connected nor reconnecting -- the
+    // idle state, which used to render the transient "Connecting" label
+    // permanently.
+    expect(find.text('Not connected'), findsOneWidget);
+    expect(find.text('Connecting'), findsNothing);
+
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
 }

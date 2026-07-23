@@ -49,7 +49,12 @@ live list. Highest-impact until fixed:
 - **Dart protoc plugin**: regen needs
   `PATH="$PATH:$HOME/.pub-cache/bin"`; stale stubs can MASK missing
   abstract-method implementations until regenerated (bit us in Phase
-  I: `preArmPairingCode`).
+  I: `preArmPairingCode`; bit us again in Phase K, this time worse --
+  `mobile/lib/src/services/connectible_server.dart` was missing
+  `recordTransferHistory`/`listTransferHistory` entirely, a real gap
+  dating back to Phase J that nobody had noticed because the checked-
+  out stubs simply predated those RPCs. Regenerate proactively after
+  *any* proto edit, in the same session, not just once at the end).
 - **mobile pairing tests** run a real loopback TLS server; slow
   machines can flake on tight timeouts — investigate before blaming
   the code.
@@ -59,14 +64,28 @@ live list. Highest-impact until fixed:
 - **T-A25** (flagged in `docs/TASKS.md` T-I7): real Linux<->Android
   transfer with a Wi-Fi drop mid-transfer — the legacy fallback path
   is gone, so resume behavior on real Wi-Fi is unproven.
-- Multicast-lock discovery behavior once T-X20 lands.
+- Multicast-lock discovery behavior (T-X20 landed 2026-07-22; whether
+  it actually fixes field discovery on a real device is still
+  unconfirmed).
+- Notification cancel-on-receipt (Phase K, T-K4): `cancelNotification`
+  succeeding as an API call is confirmed by design (see the finding in
+  `ConnectibleNotificationListener.kt`'s doc comment), but whether it
+  actually clears the OS notification on a real device is unconfirmed.
 - Battery drain measurement (roadmap Phase N).
+- Mobile image clipboard round-trip (Phase L, T-L7): `super_clipboard`
+  read/write compiles and analyzes clean, but was never exercised on a
+  real device/emulator (no `flutter test` run this session either, see
+  `docs/TASKS.md` T-L9). If it fails at runtime on Android specifically,
+  check the `SuperClipboardDataProvider` `<provider>` entry in
+  `AndroidManifest.xml` exists and the authority string matches the
+  app's actual `applicationId` first.
 
 ## Operational quirks
 
-- `docs/` is the GitHub Pages root: everything under it (including
-  `docs/archive/` audit reports) is published if Pages is enabled —
-  decision pending as T-X38.
+- `docs/` is the GitHub Pages root; `.github/workflows/pages.yml`
+  excludes `docs/archive/` from the deployed artifact (T-X38, decided
+  and implemented 2026-07-22/23) via a staging step, not a native
+  include/exclude option on `upload-pages-artifact`.
 - Generated Dart gRPC stubs are intentionally NOT committed
   (regenerate via `mobile/tool/gen_proto.sh`).
 - `backups/` contains a frozen pre-rewrite desktop and the abandoned

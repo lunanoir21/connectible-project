@@ -2,11 +2,12 @@ use std::path::PathBuf;
 
 use connectibled::proto::connectible::v1::connectible_client::ConnectibleClient;
 use connectibled::proto::connectible::v1::{
-    DisconnectDeviceRequest, ForgetDeviceRequest, GetLocalStateRequest,
-    GetPinnedFingerprintRequest, ListDevicesRequest, ListTransferHistoryRequest, LocalEvent,
-    LocalEventsRequest, PingRequest, PreArmPairingCodeRequest, RecordFingerprintRequest,
-    RecordTransferHistoryRequest, RunDiagnosticsRequest, SetClipboardSyncEnabledRequest,
-    SetRemoteInputEnabledRequest, TransferHistoryEntry,
+    DismissNotificationRequest, DisconnectDeviceRequest, ForgetDeviceRequest,
+    GetLocalStateRequest, GetPinnedFingerprintRequest, ListDevicesRequest,
+    ListTransferHistoryRequest, LocalEvent, LocalEventsRequest, PingRequest,
+    PreArmPairingCodeRequest, RecordFingerprintRequest, RecordTransferHistoryRequest,
+    RunDiagnosticsRequest, SetClipboardSyncEnabledRequest, SetRemoteInputEnabledRequest,
+    TransferHistoryEntry,
 };
 use tonic::transport::{Certificate, Channel, ClientTlsConfig};
 use tonic::Streaming;
@@ -137,9 +138,9 @@ pub fn ui_identity(
     }
 }
 
-/// Builds the pinned-certificate TLS config shared by `LocalDaemonClient::
-/// connect` and `tls_handshake_check`, reading the cert the daemon wrote
-/// to its data dir on first run.
+/// Builds the pinned-certificate TLS config used by `LocalDaemonClient::
+/// connect`, reading the cert the daemon wrote to its data dir on first
+/// run.
 fn pinned_tls_config(data_dir: &std::path::Path) -> Result<ClientTlsConfig> {
     let cert_path = data_dir.join("tls").join("cert.pem");
     let cert_pem = std::fs::read_to_string(&cert_path).map_err(|e| {
@@ -154,22 +155,6 @@ fn pinned_tls_config(data_dir: &std::path::Path) -> Result<ClientTlsConfig> {
         // The daemon's self-signed cert carries "localhost" as its
         // subject alt name (see daemon/src/tls.rs).
         .domain_name("localhost"))
-}
-
-/// Performs only the TLS 1.3 handshake against the local daemon (channel
-/// connect, no RPC), using the same pinned-certificate trust model as
-/// `LocalDaemonClient::connect`. Used by the desktop Doctor panel to
-/// prove the TLS/certificate layer works independently of whether any
-/// particular gRPC call succeeds.
-pub async fn tls_handshake_check(data_dir: &std::path::Path, port: u16) -> Result<()> {
-    let tls = pinned_tls_config(data_dir)?;
-    Channel::from_shared(format!("https://127.0.0.1:{port}"))
-        .map_err(|e| DesktopError::InvalidAddress(e.to_string()))?
-        .tls_config(tls)?
-        .connect()
-        .await
-        .map_err(|e| DesktopError::DaemonUnreachable(e.to_string()))?;
-    Ok(())
 }
 
 impl LocalDaemonClient {
@@ -240,6 +225,20 @@ impl LocalDaemonClient {
             .await?
             .into_inner();
         Ok(response.was_connected)
+    }
+
+    /// Dismisses a mirrored notification (T-K5): removes it from this
+    /// daemon's own status and broadcasts the dismissal to every
+    /// connected peer, so the originating device can clear the real
+    /// system notification.
+    pub async fn dismiss_notification(&self, notification_id: &str) -> Result<()> {
+        let mut client = self.client.clone();
+        client
+            .dismiss_notification(DismissNotificationRequest {
+                notification_id: notification_id.to_string(),
+            })
+            .await?;
+        Ok(())
     }
 
     /// Permanently removes a paired device from the daemon's store

@@ -9,7 +9,6 @@ enum AppLocale { en, tr }
 
 const Map<String, String> _en = {
   'nav.home': 'Home',
-  'nav.devices': 'Devices',
   'nav.clipboard': 'Clipboard',
   'nav.transfers': 'Transfers',
   'nav.input': 'Remote',
@@ -17,11 +16,9 @@ const Map<String, String> _en = {
   'status.connected': 'Connected',
   'status.connecting': 'Connecting',
   'status.reconnecting': 'Reconnecting',
+  'status.idle': 'Not connected',
   'status.thisDevice': 'This device',
   'common.pair': 'Pair',
-  'common.pairing': 'Pairing...',
-  'common.cancel': 'Cancel',
-  'common.close': 'Close',
   'common.online': 'Online',
   'common.offline': 'Offline',
   'home.connectedToOne': 'Connected to {name}',
@@ -30,9 +27,18 @@ const Map<String, String> _en = {
   'home.paired': 'Paired',
   'home.statPaired': 'Paired',
   'home.connectByAddress': 'Connect by address',
+  // T-X33: `DeviceListModel.lastDiscoveryError` is raw, dynamic mDNS/
+  // platform-channel text (not a fixed message set), so only the
+  // wrapping label is translatable -- mirrors how the desktop Doctor
+  // panel's `detail` field stays daemon-raw for the same reason.
+  'home.discoveryError': 'Device discovery: {error}',
+  // T-X32: shorthand for this device's own name in the compact
+  // "THIS DEVICE / {name}" eyebrow, when no device name is set yet.
+  'home.meFallback': 'Me',
   'home.fingerprintChanged':
       "This device's security key changed since pairing. Forget it and pair "
           'again to reconnect.',
+  'home.pairingRejected': 'Pairing was rejected',
   'home.receivingTitle': 'Discoverable',
   'home.receivingOnHint': 'Other devices can find this phone and send it files.',
   'home.receivingOffHint': 'Turn on to let other devices pair and send files.',
@@ -50,6 +56,11 @@ const Map<String, String> _en = {
   'devices.emptyHint':
       'Make sure a computer on this network is running Connectible.',
   'devices.onlineNow': 'Online now',
+  // T-X32: shown when a peer advertises an empty device_name (mDNS TXT
+  // record, pairing request, or paired-roster entry) -- the model/
+  // service layer that first sees these has no i18n access, so it
+  // stores '' and the widget layer supplies this at render time.
+  'devices.unknownName': 'Unknown device',
   'menu.connect': 'Connect',
   'menu.refresh': 'Refresh',
   'menu.info': 'Device info',
@@ -62,13 +73,18 @@ const Map<String, String> _en = {
   'info.address': 'Address',
   'info.deviceId': 'Device ID',
   'info.done': 'Done',
-  'clipboard.title': 'Clipboard',
   'clipboard.emptyTitle': 'Nothing copied yet',
   'clipboard.emptyHint': 'Copied text syncs here between your paired devices.',
   'clipboard.send': 'Send clipboard',
   'clipboard.copy': 'Copy',
   'clipboard.history': 'Clipboard history',
-  'transfers.title': 'Transfers',
+  // T-X32: `ClipboardEntry.source` is currently always the raw sentinel
+  // 'local'/'remote' (models.dart's own doc comment aspires to a real
+  // peer name/id, not implemented yet) -- this is what non-local
+  // renders instead of the literal English word "remote".
+  'clipboard.remoteSource': 'Remote device',
+  'clipboard.oversized': 'Too large to sync ({size})',
+  'clipboard.image': 'Image',
   'transfers.emptyTitle': 'No transfers yet',
   'transfers.emptyHint': 'Send a file to a paired device or receive one.',
   'transfers.sendFile': 'Send file',
@@ -87,6 +103,13 @@ const Map<String, String> _en = {
   'transfers.sendHint': 'Choose a file to send to {name}.',
   'transfers.notConnectedHint': 'Connect to a paired device first to send files.',
   'transfers.aDevice': 'the paired device',
+  // T-X24: history row relative-time label, mirroring desktop's
+  // formatRelativeTime (T-X15) granularity but hand-rolled (no `intl`
+  // dependency on mobile).
+  'transfers.timeJustNow': 'Just now',
+  'transfers.timeMinutesAgo': '{n}m ago',
+  'transfers.timeHoursAgo': '{n}h ago',
+  'transfers.timeDaysAgo': '{n}d ago',
   'input.title': 'Remote control',
   'input.eyebrow': 'Remote input',
   'input.hint':
@@ -106,7 +129,6 @@ const Map<String, String> _en = {
   'input.alt': 'Alt',
   'input.noDevice': 'Pair a computer to control it from here.',
   'settings.title': 'Settings',
-  'settings.subtitle': 'Appearance, language, and connection details',
   'settings.appearance': 'Appearance',
   'settings.appearanceHint': 'Pick a monochrome theme. All themes are dark.',
   'settings.themeCharcoal': 'Charcoal',
@@ -199,7 +221,6 @@ const Map<String, String> _en = {
 
 const Map<String, String> _tr = {
   'nav.home': 'Ana ekran',
-  'nav.devices': 'Cihazlar',
   'nav.clipboard': 'Pano',
   'nav.transfers': 'Aktarımlar',
   'nav.input': 'Uzaktan',
@@ -207,11 +228,9 @@ const Map<String, String> _tr = {
   'status.connected': 'Bağlı',
   'status.connecting': 'Bağlanıyor',
   'status.reconnecting': 'Yeniden bağlanıyor',
+  'status.idle': 'Bağlı değil',
   'status.thisDevice': 'Bu cihaz',
   'common.pair': 'Eşleştir',
-  'common.pairing': 'Eşleştiriliyor...',
-  'common.cancel': 'İptal',
-  'common.close': 'Kapat',
   'common.online': 'Çevrimiçi',
   'common.offline': 'Çevrimdışı',
   'home.connectedToOne': '{name} ile bağlı',
@@ -220,9 +239,12 @@ const Map<String, String> _tr = {
   'home.paired': 'Eşleşti',
   'home.statPaired': 'Eşleşmiş',
   'home.connectByAddress': 'Adresle bağlan',
+  'home.discoveryError': 'Cihaz keşfi: {error}',
+  'home.meFallback': 'Ben',
   'home.fingerprintChanged':
       'Bu cihazın güvenlik anahtarı eşleşmeden sonra değişti. Yeniden '
           'bağlanmak için cihazı unutup tekrar eşleştir.',
+  'home.pairingRejected': 'Eşleştirme reddedildi',
   'home.receivingTitle': 'Keşfedilebilir',
   'home.receivingOnHint': 'Diğer cihazlar bu telefonu bulup dosya gönderebilir.',
   'home.receivingOffHint': 'Diğer cihazların eşleşip dosya göndermesi için aç.',
@@ -240,6 +262,7 @@ const Map<String, String> _tr = {
   'devices.emptyHint':
       'Bu ağdaki bir bilgisayarda Connectible çalıştığından emin ol.',
   'devices.onlineNow': 'Şu an çevrimiçi',
+  'devices.unknownName': 'Bilinmeyen cihaz',
   'menu.connect': 'Bağlan',
   'menu.refresh': 'Yenile',
   'menu.info': 'Cihaz bilgileri',
@@ -252,14 +275,15 @@ const Map<String, String> _tr = {
   'info.address': 'Adres',
   'info.deviceId': 'Cihaz kimliği',
   'info.done': 'Tamam',
-  'clipboard.title': 'Pano',
   'clipboard.emptyTitle': 'Henüz kopyalanmadı',
   'clipboard.emptyHint':
       'Kopyalanan metin eşleşmiş cihazların arasında burada senkronlanır.',
   'clipboard.send': 'Panoyu gönder',
   'clipboard.copy': 'Kopyala',
   'clipboard.history': 'Pano geçmişi',
-  'transfers.title': 'Aktarımlar',
+  'clipboard.remoteSource': 'Uzak cihaz',
+  'clipboard.oversized': 'Senkronize edilemeyecek kadar büyük ({size})',
+  'clipboard.image': 'Görsel',
   'transfers.emptyTitle': 'Henüz aktarım yok',
   'transfers.emptyHint': 'Eşleşmiş bir cihaza dosya gönder ya da al.',
   'transfers.sendFile': 'Dosya gönder',
@@ -278,6 +302,10 @@ const Map<String, String> _tr = {
   'transfers.sendHint': '{name} cihazına göndermek için bir dosya seç.',
   'transfers.notConnectedHint': 'Dosya göndermek için önce eşleşmiş bir cihaza bağlan.',
   'transfers.aDevice': 'eşleşmiş cihaz',
+  'transfers.timeJustNow': 'Az önce',
+  'transfers.timeMinutesAgo': '{n} dk önce',
+  'transfers.timeHoursAgo': '{n} sa önce',
+  'transfers.timeDaysAgo': '{n} g önce',
   'input.title': 'Uzaktan kontrol',
   'input.eyebrow': 'Uzaktan giriş',
   'input.hint':
@@ -297,7 +325,6 @@ const Map<String, String> _tr = {
   'input.alt': 'Alt',
   'input.noDevice': 'Buradan kontrol etmek için bir bilgisayar eşleştir.',
   'settings.title': 'Ayarlar',
-  'settings.subtitle': 'Görünüm, dil ve bağlantı bilgileri',
   'settings.appearance': 'Görünüm',
   'settings.appearanceHint': 'Bir monokrom tema seç. Tüm temalar koyudur.',
   'settings.themeCharcoal': 'Kömür',

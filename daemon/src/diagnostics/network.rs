@@ -36,11 +36,14 @@ impl Check for OwnAddress {
     async fn run(&self, _ctx: &DiagnosticsContext) -> CheckResult {
         match primary_lan_ip() {
             Some(ip) => CheckResult::ok(self, format!("Reachable at {ip}"))
+                .summary_key("doctor.msg.lanAddress.reachable")
                 .with_data("address", ip),
             None => CheckResult::ok(self, "No LAN address")
                 .warn("Not connected to a network")
+                .summary_key("doctor.msg.lanAddress.none")
                 .detail("No non-loopback IPv4 address is bound.")
-                .remediation("Connect this device to the same Wi-Fi/LAN as its peers."),
+                .remediation("Connect this device to the same Wi-Fi/LAN as its peers.")
+                .remediation_key("doctor.msg.lanAddress.none.remediation"),
         }
     }
 }
@@ -76,12 +79,15 @@ impl Check for PortReachable {
 
         if reachable {
             CheckResult::ok(self, format!("Listening on port {port}"))
+                .summary_key("doctor.msg.daemonPort.reachable")
                 .with_data("port", port.to_string())
         } else {
             CheckResult::ok(self, format!("Port {port} not reachable"))
                 .error(format!("Nothing is listening on port {port}"))
+                .summary_key("doctor.msg.daemonPort.unreachable")
                 .detail(format!("TCP connect to {addr} failed."))
                 .remediation("Start the daemon (connectibled), or check that no firewall blocks the port.")
+                .remediation_key("doctor.msg.daemonPort.unreachable.remediation")
                 .with_data("port", port.to_string())
         }
     }
@@ -107,18 +113,21 @@ impl Check for TlsCertPresent {
         let key_ok = key.is_file();
         if cert_ok && key_ok {
             CheckResult::ok(self, "Certificate and key present")
+                .summary_key("doctor.msg.tlsCert.present")
                 .with_data("cert", cert.display().to_string())
         } else {
-            let missing = match (cert_ok, key_ok) {
-                (false, false) => "certificate and key",
-                (false, true) => "certificate",
-                (true, false) => "private key",
+            let (missing, summary_key) = match (cert_ok, key_ok) {
+                (false, false) => ("certificate and key", "doctor.msg.tlsCert.missingBoth"),
+                (false, true) => ("certificate", "doctor.msg.tlsCert.missingCert"),
+                (true, false) => ("private key", "doctor.msg.tlsCert.missingKey"),
                 (true, true) => unreachable!(),
             };
             CheckResult::ok(self, "TLS material missing")
                 .error(format!("Missing TLS {missing}"))
+                .summary_key(summary_key)
                 .detail(format!("Expected under {}", ctx.config.tls_dir.display()))
                 .remediation("Start the daemon once -- it generates a self-signed cert/key on first run.")
+                .remediation_key("doctor.msg.tlsCert.missing.remediation")
         }
     }
 }

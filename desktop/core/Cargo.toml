@@ -28,6 +28,9 @@ uuid = { version = "1", features = ["v4"] }
 # matched byte-for-byte by the daemon receiver's own digest.
 sha2 = "0.10"
 hex = "0.4"
+# Base64-encode clipboard bytes (Phase L: content is Vec<u8> now, can be
+# an image) crossing the Tauri IPC boundary as JSON.
+base64 = "0.22"
 directories = "5"
 # Enumerate local network interfaces so the desktop can show its own
 # LAN address for the "connect by address" reverse direction (the

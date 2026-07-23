@@ -1,5 +1,7 @@
 library;
 
+import 'dart:typed_data';
+
 /// UI-facing models, kept independent of the generated proto types so
 /// the service layer can convert once at the edge and the widgets never
 /// touch wire encodings.
@@ -53,11 +55,36 @@ class ClipboardEntry {
     required this.content,
     required this.capturedAtMs,
     required this.source,
+    this.mimeType = 'text/plain',
+    this.imageBytes,
+    this.oversized = false,
+    this.byteSize = 0,
   });
 
+  /// Decoded text; empty for image entries and for oversized entries
+  /// (Phase L, T-L8 -- an oversized entry's bytes are never held in
+  /// memory, only its metadata).
   final String content;
   final int capturedAtMs;
   final String source; // "local" or a peer device name/id
+
+  /// "text/plain" or "image/png" (Phase L, T-L7). Defaults to
+  /// "text/plain" so existing text-only callers are unaffected.
+  final String mimeType;
+
+  /// Raw image bytes when [mimeType] is an image type; null otherwise
+  /// (including for oversized entries).
+  final Uint8List? imageBytes;
+
+  /// True when the original content exceeded the sync size cap and was
+  /// recorded for visibility only -- see daemon's `MAX_CLIPBOARD_BYTES`.
+  final bool oversized;
+
+  /// Actual size in bytes; only meaningful to display when [oversized]
+  /// is true.
+  final int byteSize;
+
+  bool get isImage => mimeType.startsWith('image/');
 }
 
 enum TransferDirection { incoming, outgoing }
@@ -72,6 +99,8 @@ class TransferProgress {
     this.completed = false,
     this.failed = false,
     this.canceled = false,
+    this.finishedAtMs,
+    this.peerDeviceId,
   });
 
   final String transferId;
@@ -82,6 +111,15 @@ class TransferProgress {
   final bool completed;
   final bool failed;
   final bool canceled;
+
+  // T-X24 display aids (mobile half of desktop's T-X16), not part of the
+  // live upload/send path itself. `finishedAtMs` is stamped client-side
+  // the moment a live transfer reaches a terminal state, so the merged
+  // history list can sort chronologically; `peerDeviceId` is only present
+  // on rows built from persisted history (a live in-session row doesn't
+  // carry a peer id) -- see `transfers_screen.dart`.
+  final int? finishedAtMs;
+  final String? peerDeviceId;
 
   bool get active => !completed && !failed;
 

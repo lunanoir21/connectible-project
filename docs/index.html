@@ -964,6 +964,8 @@
       <a href="#security">Security</a>
       <a href="#architecture">Architecture</a>
       <a href="#quickstart">Quick start</a>
+      <a href="guide/index.html">Guide</a>
+      <a href="changelog.html">Changelog</a>
     </nav>
     <a class="nav-gh" href="https://github.com/lunanoir21/connectible-project" rel="noopener">
       <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
@@ -987,6 +989,7 @@
     <div class="hero-cta">
       <a class="btn btn-solid" href="https://github.com/lunanoir21/connectible-project" rel="noopener">View on GitHub</a>
       <a class="btn btn-ghost" href="#quickstart">Quick start</a>
+      <a class="btn btn-ghost" href="guide/index.html">Read the guide</a>
     </div>
     <p class="hero-hint"><code>make setup &amp;&amp; make dev</code> — that&#8217;s the whole install.</p>
 
@@ -1087,7 +1090,7 @@
             <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M5 4l7 16 2.2-6.8L21 11z"/></svg>
           </div>
           <h3>Remote input</h3>
-          <p>Drive the desktop pointer and keyboard from the phone. Injected via <code>ydotool</code>/uinput and gated behind a capability flag — never silently half-working.</p>
+          <p>Drive the desktop pointer and keyboard from the phone — native on Wayland (wlroots compositors), via <code>ydotool</code>/uinput on X11, gated behind a capability flag so it&#8217;s never silently half-working.</p>
         </div>
         <div class="card reveal">
           <div class="card-icon" aria-hidden="true">
@@ -1229,13 +1232,13 @@
         </div>
 
         <div class="boundaries reveal">
-          <h3>Known boundaries <span>MVP</span></h3>
+          <h3>Known boundaries</h3>
           <p class="intro">Documented, not hidden:</p>
           <ul>
-            <li><b>Certificate pinning lands in v1.0.</b> Today, self-signed certs are accepted per connection — no trust-on-first-use yet.</li>
-            <li><b>The device database is plaintext SQLite.</b> Encryption at rest is on the roadmap, not in the MVP.</li>
-            <li><b>Remote input is Linux/X11 today.</b> On Wayland the <code>remote_input</code> capability is simply not advertised until the backend exists.</li>
-            <li><b>No internet relay.</b> Off the LAN means offline — deliberately, but it&#8217;s still a boundary worth knowing.</li>
+            <li><b>No internet relay, by design.</b> Off the LAN means offline — deliberately, but it&#8217;s still a boundary worth knowing.</li>
+            <li><b>A compositor with neither wlroots protocols nor XWayland</b> (most non-wlroots Wayland compositors, e.g. GNOME/Mutter) simply doesn&#8217;t get <code>remote_input</code>/<code>clipboard</code> advertised — a missing capability flag, never a crash or a silent half-working fallback.</li>
+            <li><b>Real-device battery-drain measurement</b> from running Connectible in the background is still open (roadmap Phase N) — battery <i>status</i> reporting itself already works today.</li>
+            <li><b>The mobile-side client certificate half of TOFU can&#8217;t be offered</b> by mobile&#8217;s own inbound server — a <code>dart:io</code> platform limitation, documented in <a href="https://github.com/lunanoir21/connectible-project/blob/main/docs/tofu-trust-store.md" rel="noopener">docs/tofu-trust-store.md</a>.</li>
           </ul>
         </div>
       </div>
@@ -1262,7 +1265,7 @@
           <div class="arch-stack">
             <span class="tag">tokio</span><span class="tag">tonic · gRPC/HTTP2</span><span class="tag">rustls</span><span class="tag">mdns-sd</span><span class="tag">sqlx · SQLite</span>
           </div>
-          <p class="arch-status">built + tested — 36 tests</p>
+          <p class="arch-status">built + tested — 130+ tests (<code>cargo test --workspace</code>)</p>
         </div>
         <div class="arch reveal">
           <p class="arch-kind">Desktop · Tauri v2</p>
@@ -1271,7 +1274,7 @@
           <div class="arch-stack">
             <span class="tag">Tauri v2</span><span class="tag">React 18</span><span class="tag">TypeScript</span><span class="tag">Tailwind</span>
           </div>
-          <p class="arch-status">built + tested — 3 e2e + 19 unit</p>
+          <p class="arch-status">built + tested — 130+ tests (<code>npx vitest run</code>)</p>
         </div>
         <div class="arch reveal">
           <p class="arch-kind">Mobile · Flutter</p>
@@ -1280,7 +1283,7 @@
           <div class="arch-stack">
             <span class="tag">Flutter</span><span class="tag">Dart</span><span class="tag">Provider</span>
           </div>
-          <p class="arch-status">code complete — needs a Flutter toolchain to build</p>
+          <p class="arch-status">built + tested — 180+ tests (<code>flutter test</code>); needs a Flutter toolchain to build</p>
         </div>
       </div>
 
@@ -1397,6 +1400,8 @@
           <a href="https://github.com/lunanoir21/connectible-project" rel="noopener">GitHub</a>
           <a href="https://github.com/lunanoir21/connectible-project/blob/main/README.md" rel="noopener">README</a>
           <a href="https://github.com/lunanoir21/connectible-project/blob/main/docs/ARCHITECTURE.md" rel="noopener">Architecture</a>
+          <a href="guide/index.html">User guide</a>
+          <a href="changelog.html">Changelog</a>
         </div>
         <div class="foot-col">
           <h4>Internals</h4>

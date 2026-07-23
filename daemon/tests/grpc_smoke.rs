@@ -12,8 +12,9 @@ use std::time::Duration;
 use common::{connect_client, pair_device, spawn_test_daemon, test_identity};
 use connectibled::proto::connectible::v1::sync_frame::Payload;
 use connectibled::proto::connectible::v1::{
-    local_event, ClipboardData, ConfirmPinRequest, GetLocalStateRequest, Identity,
-    ListDevicesRequest, LocalEventsRequest, PairRequest, PingRequest, SyncFrame,
+    local_event, ClipboardData, ConfirmPinRequest, DismissNotificationRequest,
+    GetLocalStateRequest, Identity, ListDevicesRequest, LocalEventsRequest, NotificationData,
+    PairRequest, PingRequest, SyncFrame,
 };
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -114,7 +115,10 @@ async fn sync_stream_clipboard_frame_updates_real_clipboard() {
     // single delay is inherently racy against that backend.
     let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
     let clipboard_content = loop {
-        let current = local_backend.get_text().expect("read local clipboard");
+        let current = local_backend
+            .get_content()
+            .expect("read local clipboard")
+            .and_then(|c| c.as_text());
         if current.as_deref() == Some(unique_marker.as_str())
             || tokio::time::Instant::now() >= deadline
         {
@@ -331,5 +335,115 @@ async fn connected_peer_is_reported_online_over_real_tls() {
     );
 
     drop(tx); // close the stream
+}
+
+/// Full round trip for T-K5: the local UI (loopback caller) dismisses a
+/// notification that was mirrored in from a connected peer. Verifies
+/// both halves -- this daemon's own status drops it (so its own UI
+/// reflects the dismiss immediately) *and* the still-connected peer
+/// receives the relayed `is_dismissal` frame, so it can clear the real
+/// system notification too.
+#[tokio::test]
+async fn dismiss_notification_updates_local_status_and_relays_to_the_peer() {
+    let (_tmp, config, port) = spawn_test_daemon().await;
+    pair_device(&config, port, "notif-peer", "Notif Peer").await;
+
+    // The peer opens SyncStream, identifies itself, and posts a
+    // notification -- exactly what a real phone does on T-K3's path.
+    // Held open via an explicit channel (not a short `async_stream!`
+    // that ends after its last `yield`): the relayed dismissal below is
+    // *server-pushed*, so the stream must still be live to receive it --
+    // an ended outbound half closes the whole bidi RPC.
+    let mut peer_client = connect_client(&config, port).await;
+    let (tx, rx) = mpsc::channel::<SyncFrame>(4);
+    tx.send(SyncFrame {
+        payload: Some(Payload::Identity(Identity {
+            device_id: "notif-peer".to_string(),
+            device_name: "Notif Peer".to_string(),
+            platform: 0,
+            device_type: 0,
+            protocol_version: 1,
+            app_version: "0.1.0".to_string(),
+            capabilities: vec![],
+        })),
+    })
+    .await
+    .expect("send identity");
+    tx.send(SyncFrame {
+        payload: Some(Payload::Notification(NotificationData {
+            notification_id: "n-e2e-1".to_string(),
+            app_name: "Messages".to_string(),
+            title: "Hello".to_string(),
+            body: "World".to_string(),
+            icon: vec![],
+            posted_at_ms: 0,
+            is_dismissal: false,
+        })),
+    })
+    .await
+    .expect("send notification");
+    let mut peer_inbound = peer_client
+        .sync_stream(ReceiverStream::new(rx))
+        .await
+        .expect("sync_stream rpc")
+        .into_inner();
+    let _ = peer_inbound.message().await; // identity echo
+
+    // Loopback caller (the local desktop UI) confirms the notification
+    // landed in this daemon's own status before dismissing it.
+    let mut local_client = connect_client(&config, port).await;
+    let before = local_client
+        .get_local_state(GetLocalStateRequest {})
+        .await
+        .expect("get_local_state rpc")
+        .into_inner();
+    assert!(
+        before
+            .notifications
+            .iter()
+            .any(|n| n.notification_id == "n-e2e-1"),
+        "the mirrored notification must be in local status before dismissing it"
+    );
+
+    local_client
+        .dismiss_notification(DismissNotificationRequest {
+            notification_id: "n-e2e-1".to_string(),
+        })
+        .await
+        .expect("dismiss_notification rpc");
+
+    // Half 1: this daemon's own status no longer lists it.
+    let after = local_client
+        .get_local_state(GetLocalStateRequest {})
+        .await
+        .expect("get_local_state rpc")
+        .into_inner();
+    assert!(
+        !after
+            .notifications
+            .iter()
+            .any(|n| n.notification_id == "n-e2e-1"),
+        "dismiss_notification must remove the entry from local status"
+    );
+
+    // Half 2: the connected peer receives the relayed dismissal.
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    let relayed = loop {
+        let next = tokio::time::timeout(Duration::from_millis(200), peer_inbound.message()).await;
+        if let Ok(Ok(Some(frame))) = next {
+            if let Some(Payload::Notification(n)) = frame.payload {
+                if n.notification_id == "n-e2e-1" {
+                    break Some(n);
+                }
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            break None;
+        }
+    };
+    let relayed = relayed.expect("peer must receive the relayed dismissal frame");
+    assert!(relayed.is_dismissal);
+
+    drop(tx); // close the peer's stream
 }
 

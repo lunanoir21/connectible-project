@@ -9,6 +9,7 @@ import 'package:flutter/widgets.dart'
     show AppLifecycleState, WidgetsBinding, WidgetsBindingObserver;
 import 'package:shared_preferences/shared_preferences.dart';
 
+import '../app_info.dart';
 import '../models/models.dart';
 import '../services/mdns_service.dart';
 import '../generated/connectible.pbgrpc.dart' as pb;
@@ -70,17 +71,26 @@ class DeviceListModel extends ChangeNotifier with WidgetsBindingObserver {
       platform: _currentPlatform(),
       deviceType: pb.DeviceType.DEVICE_TYPE_PHONE,
       protocolVersion: 1,
-      appVersion: '0.1.0',
+      appVersion: kAppVersion,
       // Advertise only capabilities this app actually implements.
       // `battery` is really sent (Phase B / BatteryModel); `notifications`
       // is now implemented too (Phase B / NotificationModel, gated on the
       // user granting system Notification access at runtime). We advertise
       // support, not the runtime grant state -- matching how the desktop
       // advertises its capabilities.
+      //
+      // `remote_input` is deliberately NOT advertised (T-X33): the phone
+      // can *send* input events to control a paired desktop (PairingModel.
+      // sendMouseMove/sendKey/...), but the reverse -- being controlled --
+      // is unimplemented: `_onInboundFrame`'s switch has no case for an
+      // incoming `inputEvent`, so a desktop that saw this capability and
+      // tried to control the phone would have every event silently
+      // dropped. Sending input outward needs no capability flag of its
+      // own (it's a phone-initiated action against the desktop's already-
+      // advertised support), so omitting this here costs nothing.
       capabilities: const [
         'clipboard',
         'file_transfer',
-        'remote_input',
         'battery',
         'notifications',
       ],
@@ -154,9 +164,11 @@ class DeviceListModel extends ChangeNotifier with WidgetsBindingObserver {
     required String platform,
   }) {
     final now = DateTime.now().millisecondsSinceEpoch;
+    // T-X32: an empty name is stored as-is -- this layer has no i18n
+    // access; the widget layer resolves it via displayDeviceName().
     final peer = DeviceInfo(
       deviceId: deviceId,
-      deviceName: deviceName.isEmpty ? 'Unknown device' : deviceName,
+      deviceName: deviceName,
       online: true,
       pairedAtMs: now,
       lastSeenMs: now,

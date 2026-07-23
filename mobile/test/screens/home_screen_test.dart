@@ -192,6 +192,65 @@ void main() {
   });
 
   testWidgets(
+      'surfaces a discovery error on Home instead of looking identical to '
+      '"no nearby devices" (T-X33)', (tester) async {
+    final deviceList = await buildDeviceList();
+    deviceList.lastDiscoveryError = 'mDNS sweep failed: socket error';
+    final pairing = buildPairing(deviceList);
+
+    await tester.pumpWidget(wrapScreen(
+      const HomeScreen(),
+      disableAnimations: true,
+      providers: [
+        ChangeNotifierProvider<DeviceListModel>.value(value: deviceList),
+        ChangeNotifierProvider<PairingModel>.value(value: pairing),
+      ],
+    ));
+    await tester.pumpAndSettle();
+
+    expect(
+        find.text('Device discovery: mDNS sweep failed: socket error'),
+        findsOneWidget);
+
+    await disposeSoon(tester, pairing, deviceList);
+  });
+
+  testWidgets(
+      'renders a nearby device with a single-character name without '
+      'crashing (T-X26)', (tester) async {
+    // A 1-char, single-word mDNS-advertised name used to crash
+    // monogram()'s unchecked substring(0, 2) -- a LAN-triggerable crash
+    // via any peer that advertises a short name.
+    final deviceList = await buildDeviceList();
+    deviceList.nearby = const [
+      NearbyDevice(
+        deviceId: 'peer-short-name',
+        deviceName: 'A',
+        platform: 'PLATFORM_ANDROID',
+        host: '192.168.1.41',
+        port: 58231,
+      ),
+    ];
+    final pairing = buildPairing(deviceList);
+
+    await tester.pumpWidget(wrapScreen(
+      const HomeScreen(),
+      disableAnimations: true,
+      providers: [
+        ChangeNotifierProvider<DeviceListModel>.value(value: deviceList),
+        ChangeNotifierProvider<PairingModel>.value(value: pairing),
+      ],
+    ));
+    await tester.pumpAndSettle();
+
+    // No exception thrown during render, and the monogram shows the
+    // single letter rather than crashing on substring(0, 2).
+    expect(find.text('A'), findsWidgets);
+
+    await disposeSoon(tester, pairing, deviceList);
+  });
+
+  testWidgets(
       'offers a direct Connect action for a paired-but-offline device '
       'rediscovered via mDNS, instead of forcing Forget + re-pair',
       (tester) async {
@@ -363,6 +422,37 @@ void main() {
         find.text("This device's security key changed since pairing. "
             'Forget it and pair again to reconnect.'),
         findsOneWidget);
+    expect(find.text('raw english fallback'), findsNothing);
+
+    await disposeSoon(tester, pairing, deviceList);
+  });
+
+  testWidgets(
+      'a pairing rejection shows its dedicated localized string, not the '
+      "model's hardcoded English (T-X32)", (tester) async {
+    final deviceList = await buildDeviceList();
+    final pairing = _ErrorPairing(deviceList);
+
+    await tester.pumpWidget(wrapScreen(
+      const HomeScreen(),
+      disableAnimations: true,
+      providers: [
+        ChangeNotifierProvider<DeviceListModel>.value(value: deviceList),
+        ChangeNotifierProvider<PairingModel>.value(value: pairing),
+      ],
+    ));
+    await tester.pumpAndSettle();
+
+    // A raw message deliberately distinct from the translated string
+    // (home.pairingRejected's English value happens to also read
+    // "Pairing was rejected", which would make a same-text assertion
+    // pass even if the switch fell through to the raw fallback) --
+    // proves the `.rejected` kind actually routes to the i18n key.
+    pairing.emitError('raw english fallback', PairingErrorKind.rejected);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(find.text('Pairing was rejected'), findsOneWidget);
     expect(find.text('raw english fallback'), findsNothing);
 
     await disposeSoon(tester, pairing, deviceList);

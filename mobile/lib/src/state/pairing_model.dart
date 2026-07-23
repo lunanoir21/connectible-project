@@ -8,6 +8,7 @@ import '../services/connectible_exception.dart';
 import '../services/connectible_server.dart';
 import '../services/grpc_service.dart';
 import '../services/pairing_manager.dart';
+import '../services/receiving_service.dart';
 import '../services/reconnect_backoff.dart';
 import '../services/server_identity.dart';
 import 'device_list_model.dart';
@@ -38,6 +39,11 @@ enum PairingErrorKind {
   /// was refused (MITM-or-reinstall). The UI shows its own dedicated,
   /// actionable "forget and re-pair" string rather than the raw message.
   fingerprintChanged,
+
+  /// The responder declined the pairing request (T-X32). Distinct from
+  /// `generic` so the UI can show a translated string instead of the
+  /// model's hardcoded English "Pairing was rejected".
+  rejected,
 }
 
 /// Owns the pairing flow -- both requester side (dialing a discovered
@@ -58,6 +64,12 @@ class PairingModel extends ChangeNotifier
   PairingModel({
     required DeviceListModel deviceList,
     required void Function(pb.ClipboardData) onClipboardFrame,
+    // T-K4: inbound notification frames (a dismiss command from the
+    // paired peer). Optional, unlike onClipboardFrame, because not every
+    // caller needs it wired (e.g. tests that don't exercise notification
+    // sync); a null callback silently drops the frame, same as before
+    // this feature existed.
+    void Function(pb.NotificationData)? onNotificationFrame,
     Future<pb.PrepareUploadResponse> Function(pb.PrepareUploadRequest)?
         onPrepareUpload,
     Future<pb.UploadFileResult> Function(Stream<pb.UploadFilePart>)?
@@ -71,19 +83,34 @@ class PairingModel extends ChangeNotifier
     // T-G6) goes through this, not just the inbound server, so it must
     // be overridable independently of `pairableEnabled`.
     Future<ServerIdentity> Function()? ownIdentityLoader,
+    // T-X36: injectable so tests can fake it instead of touching a real
+    // platform channel (mirrors the `NotificationListener`/
+    // `SyncConnection` seam pattern already used elsewhere).
+    ReceivingService receivingService = const PlatformReceivingService(),
+    // Overridable so tests can bind an ephemeral port (0) instead of the
+    // real, fixed `kServerPort` -- exercising `setPairableEnabled`'s full
+    // start/stop path (including the receiving-service wiring above)
+    // would otherwise risk colliding with another test or a real running
+    // daemon on the well-known port.
+    int? serverPort,
   })  : _deviceList = deviceList,
         _onClipboardFrame = onClipboardFrame,
+        _onNotificationFrame = onNotificationFrame,
         _onPrepareUpload = onPrepareUpload,
         _onUploadFile = onUploadFile,
         _pairableEnabled = pairableEnabled,
-        _ownIdentityLoader = ownIdentityLoader ?? ServerIdentity.loadOrCreate {
+        _ownIdentityLoader = ownIdentityLoader ?? ServerIdentity.loadOrCreate,
+        _receivingService = receivingService,
+        _serverPort = serverPort ?? kServerPort {
     if (_pairableEnabled) {
       unawaited(_startServer());
     }
   }
 
   final DeviceListModel _deviceList;
+  final int _serverPort;
   final void Function(pb.ClipboardData) _onClipboardFrame;
+  final void Function(pb.NotificationData)? _onNotificationFrame;
   final Future<pb.PrepareUploadResponse> Function(pb.PrepareUploadRequest)?
       _onPrepareUpload;
   final Future<pb.UploadFileResult> Function(Stream<pb.UploadFilePart>)?
@@ -154,8 +181,15 @@ class PairingModel extends ChangeNotifier
   Timer? _reconnectTimer;
   int _reconnectAttempt = 0;
 
+  // T-X24: an inbound-only session (this phone as responder, e.g. a
+  // desktop pushed a file with no prior outbound dial from here) never
+  // sets `_activePeer` -- only `_inboundPeerDeviceId`, tracked by
+  // `_onInboundFrameFromRemotePeer` above. Without this fallback,
+  // `_recordHistory`'s `_connection.activePeerId` read the empty string
+  // for every inbound push, so history rows for received files could
+  // never resolve a peer name.
   @override
-  String? get activePeerId => _activePeer?.deviceId;
+  String? get activePeerId => _activePeer?.deviceId ?? _inboundPeerDeviceId;
 
   /// Whether this phone's inbound gRPC/TLS server is currently bound and
   /// accepting connections (T-F9). Gated by [pairableEnabled]; used by the
@@ -188,13 +222,32 @@ class PairingModel extends ChangeNotifier
     return _ownIdentity ??= await _ownIdentityLoader();
   }
 
-  Future<void> _startServer() async {
+  // --- receiving-role foreground service (T-X36) ------------------------
+  // Keeps the inbound server + mDNS advertise + heartbeat alive under
+  // Doze/OEM background kills while pairable is on -- a reliability aid,
+  // not a correctness requirement (everything above still works without
+  // it, just less reliably backgrounded). English defaults are used for
+  // the constructor's own auto-start (no BuildContext/i18n exists that
+  // early); [setPairableEnabled]'s callers (Home, Settings) pass the
+  // real localized strings, and [refreshReceivingNotification] lets a
+  // freshly-built screen correct an already-running notification's
+  // language without needing to toggle the setting itself.
+  final ReceivingService _receivingService;
+  static const _defaultNotifTitle = 'Discoverable';
+  static const _defaultNotifText =
+      'Other devices can find this phone and send it files.';
+
+  Future<void> _startServer({String? notifTitle, String? notifText}) async {
     if (_server != null) return;
     try {
       final identity = await _loadOwnIdentity();
       final server = ConnectibleServer(this, _pairing);
-      await server.start(identity);
+      await server.start(identity, port: _serverPort);
       _server = server;
+      unawaited(_receivingService.start(
+        notifTitle ?? _defaultNotifTitle,
+        notifText ?? _defaultNotifText,
+      ));
     } catch (e) {
       debugPrint('inbound server failed to start: $e');
     }
@@ -204,19 +257,34 @@ class PairingModel extends ChangeNotifier
   /// toggle (T-308) live: stops the inbound `ConnectibleServer` and its
   /// mDNS advertisement immediately when disabled, restarts both
   /// immediately when re-enabled. The persisted `SettingsModel` value is
-  /// what makes this stick across the next app launch.
-  Future<void> setPairableEnabled(bool enabled) async {
+  /// what makes this stick across the next app launch. [notifTitle]/
+  /// [notifText] should be the caller's localized `home.receivingTitle`/
+  /// `home.receivingOnHint` strings (T-X36); omitted only by callers with
+  /// no i18n access (falls back to English).
+  Future<void> setPairableEnabled(bool enabled,
+      {String? notifTitle, String? notifText}) async {
     if (enabled == _pairableEnabled) return;
     _pairableEnabled = enabled;
     _deviceList.setPairableEnabled(enabled);
     if (enabled) {
-      await _startServer();
+      await _startServer(notifTitle: notifTitle, notifText: notifText);
     } else {
       final server = _server;
       _server = null;
       await server?.stop();
+      unawaited(_receivingService.stop());
     }
     notifyListeners();
+  }
+
+  /// Re-posts the receiving notification with fresh (localized) text if
+  /// the server is currently running (T-X36) -- called once from Home so
+  /// a notification started in English (the constructor's auto-start, or
+  /// a locale change since) catches up without the user toggling the
+  /// setting off and back on.
+  void refreshReceivingNotification(String title, String text) {
+    if (_server == null) return;
+    unawaited(_receivingService.start(title, text));
   }
 
   @override
@@ -365,7 +433,7 @@ class PairingModel extends ChangeNotifier
       final outcome = await grpc.pair(localIdentity);
       if (!outcome.accepted) {
         await grpc.shutdown();
-        _setError('Pairing was rejected');
+        _setError('Pairing was rejected', kind: PairingErrorKind.rejected);
         notifyListeners();
         return false;
       }
@@ -376,6 +444,14 @@ class PairingModel extends ChangeNotifier
       );
       notifyListeners();
       return true;
+    } on FingerprintChangedException catch (e) {
+      // T-X33: the daemon-side (not just mobile's own local TOFU check)
+      // fingerprint mismatch also gets the same dedicated, actionable
+      // string as the client-side case, instead of collapsing to the
+      // raw peer message.
+      _setError(e.message, kind: PairingErrorKind.fingerprintChanged);
+      notifyListeners();
+      return false;
     } on ConnectibleException catch (e) {
       _setError(e.message);
       notifyListeners();
@@ -420,6 +496,14 @@ class PairingModel extends ChangeNotifier
       }
       notifyListeners();
       return true;
+    } on FingerprintChangedException catch (e) {
+      // T-X33: the daemon-side (not just mobile's own local TOFU check)
+      // fingerprint mismatch also gets the same dedicated, actionable
+      // string as the client-side case, instead of collapsing to the
+      // raw peer message.
+      _setError(e.message, kind: PairingErrorKind.fingerprintChanged);
+      notifyListeners();
+      return false;
     } on ConnectibleException catch (e) {
       _setError(e.message);
       notifyListeners();
@@ -469,12 +553,17 @@ class PairingModel extends ChangeNotifier
       case pb.SyncFrame_Payload.clipboard:
         _onClipboardFrame(frame.clipboard);
         break;
+      case pb.SyncFrame_Payload.notification:
+        // T-K4: only a dismiss command is meaningful inbound here -- see
+        // NotificationModel.handleInbound's own doc for why.
+        _onNotificationFrame?.call(frame.notification);
+        break;
       default:
         // File transfer now runs entirely over the dedicated
         // PrepareUpload/UploadFile RPCs (Phase I), not SyncFrame
         // payloads, so fileTransferStart/fileChunk/fileChunkRequest are
-        // no longer dispatched here. Other frame kinds (battery/
-        // notification/etc.) are not shown on mobile in the MVP.
+        // no longer dispatched here. Battery is not shown on mobile in
+        // the MVP.
         break;
     }
   }

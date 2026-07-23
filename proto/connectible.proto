@@ -140,8 +140,10 @@ message Identity {
 // own clipboard and MUST suppress the resulting local change-detection
 // event to avoid an infinite echo loop (track last-applied hash).
 message ClipboardData {
-  // MIME type of `content`, e.g. "text/plain", "image/png". MVP only
-  // guarantees text/plain; other types are best-effort.
+  // MIME type of `content`: "text/plain" or "image/png" (Phase L).
+  // Never sent for content exceeding the sync size cap (10MB) -- see
+  // `ClipboardHistoryEntry.oversized` for how that case is surfaced
+  // locally instead.
   string mime_type = 1;
 
   bytes content = 2;
@@ -462,6 +464,23 @@ message DisconnectDeviceResponse {
   bool was_connected = 1;
 }
 
+// Loopback-only (see "Local UI messages" section below): the local UI
+// dismissed a mirrored notification (T-K5). The daemon removes it from
+// its own notification list (so this device's UI reflects the dismiss
+// immediately, the same way an incoming dismissal from a peer already
+// does via a SyncStream NotificationData frame) and broadcasts an
+// is_dismissal=true NotificationData frame to every currently-connected
+// peer, so the originating device can clear the real system
+// notification too. Broadcasting to every peer (not just the one this
+// id happens to have come from) is deliberate and harmless -- mirrors
+// how the daemon already broadcasts local clipboard changes; a peer
+// that never posted this id simply has nothing to match.
+message DismissNotificationRequest {
+  string notification_id = 1;
+}
+
+message DismissNotificationResponse {}
+
 // Loopback-only (see "Local UI messages" section below): the local UI's
 // "Forget device" action (T-307). Unlike DisconnectDevice, this
 // permanently removes the device's row from the paired-devices store,
@@ -562,8 +581,10 @@ message PairingCompletedLocalEvent {
 // One entry of the daemon's in-memory clipboard ring buffer (T-023),
 // exposed for the desktop UI's clipboard history panel (T-037).
 message ClipboardHistoryEntry {
-  // MVP is text-only, so content is a string rather than bytes.
-  string content = 1;
+  // Empty when `oversized` is true (T-L8) -- an entry that exceeded
+  // the clipboard sync size cap is recorded for user visibility but
+  // its bytes are never held in memory/history, only its metadata.
+  bytes content = 1;
 
   string mime_type = 2;
 
@@ -572,6 +593,16 @@ message ClipboardHistoryEntry {
   // "local" for entries captured from this machine's own clipboard,
   // or the source peer's device_id for entries applied from remote.
   string source = 4;
+
+  // T-L8: true if this entry was observed locally but exceeded the
+  // clipboard sync size cap, so it was recorded for visibility but
+  // never sent to the peer.
+  bool oversized = 5;
+
+  // Actual size in bytes; always set, but only meaningful to display
+  // when `oversized` is true (a normal entry's size is just
+  // `content`'s length).
+  int64 byte_size = 6;
 }
 
 // Progress of an in-flight *incoming* file transfer (T-027), throttled
@@ -774,6 +805,12 @@ message DiagnosticCheck {
   string detail = 6;       // empty when absent
   string remediation = 7;  // empty when absent
   map<string, string> data = 8;
+  // Stable message id for `summary`, for client-side localization
+  // (T-X43). Empty = no stable template for this exact wording; the
+  // client always falls back to `summary` verbatim.
+  string summary_key = 9;
+  // Same fallback contract as `summary_key`, for `remediation`.
+  string remediation_key = 10;
 }
 
 message RunDiagnosticsResponse {
@@ -891,4 +928,8 @@ service Connectible {
   // history (both directions). Non-loopback callers receive
   // PERMISSION_DENIED.
   rpc ListTransferHistory(ListTransferHistoryRequest) returns (ListTransferHistoryResponse);
+
+  // Loopback-only (T-K5): the local UI dismissed a mirrored
+  // notification. Non-loopback callers receive PERMISSION_DENIED.
+  rpc DismissNotification(DismissNotificationRequest) returns (DismissNotificationResponse);
 }

@@ -4,12 +4,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use connectibled::proto::connectible::v1::connectible_client::ConnectibleClient;
-use connectibled::proto::connectible::v1::sync_frame::Payload;
 use connectibled::proto::connectible::v1::upload_file_part::Part as UploadPart;
 use connectibled::proto::connectible::v1::{
-    ConfirmPinRequest, ErrorCode, Identity, InputEventType, MouseButton, PairRequest,
-    PrepareUploadRequest, RemoteInputEvent, SyncFrame, UploadFileHeader, UploadFileMeta,
-    UploadFilePart,
+    ConfirmPinRequest, ErrorCode, Identity, PairRequest, PrepareUploadRequest, UploadFileHeader,
+    UploadFileMeta, UploadFilePart,
 };
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
@@ -382,82 +380,5 @@ impl RemoteDeviceClient {
             })
         }
     }
-
-    /// Opens a long-lived SyncStream dedicated to remote input events
-    /// and returns a handle for pushing them (T-048-equivalent for the
-    /// desktop-as-controller direction).
-    pub async fn open_input_session(&self, local_identity: Identity) -> Result<InputSession> {
-        let (tx, rx) = mpsc::channel::<SyncFrame>(64);
-        let mut client = self.client.clone();
-        let outbound = ReceiverStream::new(rx);
-        // The response stream is intentionally dropped: input is
-        // fire-and-forget and the server sends nothing back for it.
-        let _response = client.sync_stream(outbound).await?;
-
-        tx.send(SyncFrame {
-            payload: Some(Payload::Identity(local_identity)),
-        })
-        .await
-        .map_err(|_| DesktopError::Other("input stream closed immediately".to_string()))?;
-
-        Ok(InputSession { tx })
-    }
 }
 
-/// Handle to an open remote-input SyncStream. Dropping it closes the
-/// stream (the channel sender is the only thing keeping it open).
-pub struct InputSession {
-    tx: mpsc::Sender<SyncFrame>,
-}
-
-impl InputSession {
-    async fn send(&self, event: RemoteInputEvent) -> Result<()> {
-        self.tx
-            .send(SyncFrame {
-                payload: Some(Payload::InputEvent(event)),
-            })
-            .await
-            .map_err(|_| DesktopError::Other("input session closed".to_string()))
-    }
-
-    /// `x`, `y` normalized to [0.0, 1.0] per the wire contract.
-    pub async fn mouse_move(&self, x: f32, y: f32) -> Result<()> {
-        self.send(RemoteInputEvent {
-            r#type: InputEventType::MouseMove as i32,
-            x,
-            y,
-            ..Default::default()
-        })
-        .await
-    }
-
-    pub async fn mouse_button(&self, button: MouseButton, pressed: bool) -> Result<()> {
-        self.send(RemoteInputEvent {
-            r#type: InputEventType::MouseButton as i32,
-            button: button as i32,
-            pressed,
-            ..Default::default()
-        })
-        .await
-    }
-
-    pub async fn scroll(&self, delta_x: f32, delta_y: f32) -> Result<()> {
-        self.send(RemoteInputEvent {
-            r#type: InputEventType::MouseScroll as i32,
-            scroll_delta_x: delta_x,
-            scroll_delta_y: delta_y,
-            ..Default::default()
-        })
-        .await
-    }
-
-    pub async fn key(&self, key_code: u32, pressed: bool) -> Result<()> {
-        self.send(RemoteInputEvent {
-            r#type: InputEventType::Key as i32,
-            key_code,
-            key_pressed: pressed,
-            ..Default::default()
-        })
-        .await
-    }
-}

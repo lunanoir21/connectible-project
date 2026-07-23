@@ -211,6 +211,74 @@ void main() {
       expect(result.hashOk, isFalse);
       expect(model.incomingFilePath(fileId), isNull);
     });
+
+    test(
+        'a stream that errors mid-transfer yields a failed row (not stuck '
+        'Receiving), and a later upload still works (T-X23)', () async {
+      final model = FileTransferModel(
+          connection: _FakeConnection(), prefs: await _testPrefs());
+      addTearDown(model.dispose);
+
+      final bytes = List<int>.generate(150000, (i) => (i * 13) % 251);
+      const fileId = 'up-stream-error';
+      final prep = await prepare(model, fileId, 'e.bin', bytes);
+      final offer = prep.offers.single;
+
+      Stream<pb.UploadFilePart> erroringStream() async* {
+        yield pb.UploadFilePart(
+          header: pb.UploadFileHeader(
+            sessionId: prep.sessionId,
+            fileId: fileId,
+            token: offer.token,
+            offsetBytes: Int64(0),
+          ),
+        );
+        yield pb.UploadFilePart(chunk: bytes.sublist(0, 40000));
+        // Simulates a dropped TCP connection: the stream itself errors
+        // instead of just ending early.
+        throw Exception('simulated connection reset');
+      }
+
+      await expectLater(
+          model.handleUploadFile(erroringStream()), throwsException);
+
+      final progress = model.transfers[fileId];
+      expect(progress, isNotNull);
+      expect(progress!.completed, isFalse);
+      expect(progress.failed, isTrue,
+          reason: 'must not be left stuck in a non-terminal Receiving state');
+
+      // The failure must not have wedged the model -- a fresh, unrelated
+      // upload still completes normally.
+      const otherId = 'up-after-stream-error';
+      final otherBytes = List<int>.generate(1000, (i) => i % 250);
+      final prep2 = await prepare(model, otherId, 'ok.bin', otherBytes);
+      final offer2 = prep2.offers.single;
+      final result2 = await model.handleUploadFile(uploadStream(
+          prep2.sessionId, otherId, offer2.token, otherBytes));
+      expect(result2.completed, isTrue);
+      expect(result2.hashOk, isTrue);
+    });
+
+    test('a full ticket registry declines further offers (T-X23)', () async {
+      final model = FileTransferModel(
+          connection: _FakeConnection(), prefs: await _testPrefs());
+      addTearDown(model.dispose);
+
+      // Same single-file request repeated: each call mints a fresh token
+      // (the map key), so this fills the registry to the cap without
+      // needing distinct file ids.
+      for (var i = 0; i < FileTransferModel.maxUploadTickets; i++) {
+        final prep = await prepare(model, 'fill-$i', 'f.bin', const [1, 2, 3]);
+        expect(prep.offers.single.accepted, isTrue,
+            reason: 'offer $i should still be under the cap');
+      }
+
+      final full = await prepare(model, 'overflow', 'f.bin', const [1, 2, 3]);
+      final offer = full.offers.single;
+      expect(offer.accepted, isFalse);
+      expect(offer.rejectReason, pb.ErrorCode.ERROR_CODE_INTERNAL.name);
+    });
   });
 
   group('FileTransferModel - persisted history (Phase J)', () {

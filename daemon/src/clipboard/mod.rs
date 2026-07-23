@@ -1,7 +1,7 @@
 mod backend;
 mod wayland_backend;
 
-pub use backend::{detect_backend, ClipboardBackend, X11ClipboardBackend};
+pub use backend::{detect_backend, ClipboardBackend, ClipboardContent, X11ClipboardBackend};
 pub use wayland_backend::WaylandClipboardBackend;
 
 use std::collections::VecDeque;
@@ -16,16 +16,32 @@ use crate::proto::connectible::v1::ClipboardData;
 
 const HISTORY_CAPACITY: usize = 20;
 
+/// T-L1: hard cap on synced clipboard content, chosen so clipboard
+/// sync can't double as a backdoor bulk file-transfer channel --
+/// anything bigger belongs in the dedicated file-transfer path. Text
+/// essentially never approaches this; it exists for images (T-L3/L4).
+pub const MAX_CLIPBOARD_BYTES: usize = 10 * 1024 * 1024; // 10 MiB
+
 /// One entry in the clipboard ring buffer (T-023), shown by the
 /// desktop UI's clipboard history panel.
 #[derive(Debug, Clone)]
 pub struct ClipboardHistoryEntry {
-    pub content: String,
+    /// Empty when `oversized` is true (T-L8) -- an oversized entry's
+    /// bytes are never held in memory/history, only its metadata.
+    pub content: Vec<u8>,
     pub mime_type: String,
     pub captured_at_ms: i64,
     /// "local" for changes captured from this machine's own clipboard,
     /// or the source device_id for changes applied from a peer.
     pub source: String,
+    /// T-L8: true if this entry was observed locally but exceeded
+    /// [MAX_CLIPBOARD_BYTES], so it was recorded for visibility but
+    /// never sent to the peer.
+    pub oversized: bool,
+    /// Actual size in bytes; always set, but only meaningful to
+    /// display when `oversized` is true (a normal entry's size is
+    /// just `content.len()`).
+    pub byte_size: i64,
 }
 
 /// Change-detection and echo-suppression engine (T-022) sitting on top
@@ -64,16 +80,18 @@ impl ClipboardSync {
     /// both the last locally-observed value and the last value this
     /// daemon itself applied from a peer, returns a `ClipboardData`
     /// frame ready to broadcast. Returns `Ok(None)` on no change (the
-    /// common case, polled repeatedly) or an unchanged/echoed value.
+    /// common case, polled repeatedly), an unchanged/echoed value, or
+    /// content exceeding `MAX_CLIPBOARD_BYTES` (T-L8: recorded to
+    /// history for visibility -- see `oversized` -- but never sent).
     pub fn poll_local_change(&self) -> Result<Option<ClipboardData>> {
-        let Some(text) = self.backend.get_text()? else {
+        let Some(content) = self.backend.get_content()? else {
             return Ok(None);
         };
-        if text.is_empty() {
+        if content.bytes.is_empty() {
             return Ok(None);
         }
 
-        let hash = hash_content(text.as_bytes());
+        let hash = hash_content(&content.bytes);
 
         {
             let last_local = self
@@ -105,16 +123,37 @@ impl ClipboardSync {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(hash.clone());
         let captured_at_ms = now_ms();
+
+        if content.bytes.len() > MAX_CLIPBOARD_BYTES {
+            tracing::warn!(
+                bytes = content.bytes.len(),
+                cap = MAX_CLIPBOARD_BYTES,
+                mime_type = %content.mime_type,
+                "clipboard content exceeds the sync size cap; not sent to the peer"
+            );
+            self.push_history(ClipboardHistoryEntry {
+                content: Vec::new(),
+                mime_type: content.mime_type,
+                captured_at_ms,
+                source: "local".to_string(),
+                oversized: true,
+                byte_size: content.bytes.len() as i64,
+            });
+            return Ok(None);
+        }
+
         self.push_history(ClipboardHistoryEntry {
-            content: text.clone(),
-            mime_type: "text/plain".to_string(),
+            content: content.bytes.clone(),
+            mime_type: content.mime_type.clone(),
             captured_at_ms,
             source: "local".to_string(),
+            oversized: false,
+            byte_size: content.bytes.len() as i64,
         });
 
         Ok(Some(ClipboardData {
-            mime_type: "text/plain".to_string(),
-            content: text.into_bytes(),
+            mime_type: content.mime_type,
+            content: content.bytes,
             captured_at_ms,
             content_hash: hash,
         }))
@@ -129,6 +168,19 @@ impl ClipboardSync {
     /// clock on the peer logs a warning but the clipboard is still
     /// applied.
     pub fn apply_incoming(&self, data: &ClipboardData, source_device_id: &str) -> Result<()> {
+        // Defense in depth (T-L8): a well-behaved peer never sends
+        // oversized content (the sending side enforces the same cap
+        // above), but this daemon must not trust that unconditionally.
+        if data.content.len() > MAX_CLIPBOARD_BYTES {
+            tracing::warn!(
+                source_device_id,
+                bytes = data.content.len(),
+                cap = MAX_CLIPBOARD_BYTES,
+                "rejecting an incoming clipboard update exceeding the size cap"
+            );
+            return Ok(());
+        }
+
         if let Some(skew_ms) = clock_skew_ms(data.captured_at_ms) {
             if skew_ms.unsigned_abs() > 5 * 60 * 1000 {
                 tracing::warn!(
@@ -139,8 +191,15 @@ impl ClipboardSync {
             }
         }
 
-        let text = String::from_utf8_lossy(&data.content).into_owned();
-        self.backend.set_text(&text)?;
+        let mime_type = if data.mime_type.is_empty() {
+            "text/plain".to_string()
+        } else {
+            data.mime_type.clone()
+        };
+        self.backend.set_content(&ClipboardContent {
+            mime_type: mime_type.clone(),
+            bytes: data.content.clone(),
+        })?;
 
         *self
             .last_applied_hash
@@ -152,10 +211,12 @@ impl ClipboardSync {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(data.content_hash.clone());
 
         self.push_history(ClipboardHistoryEntry {
-            content: text,
-            mime_type: data.mime_type.clone(),
+            content: data.content.clone(),
+            mime_type,
             captured_at_ms: data.captured_at_ms,
             source: source_device_id.to_string(),
+            oversized: false,
+            byte_size: data.content.len() as i64,
         });
 
         Ok(())
@@ -211,24 +272,33 @@ mod tests {
     use tracing_test::traced_test;
 
     struct FakeBackend {
-        content: StdMutex<Option<String>>,
+        content: StdMutex<Option<ClipboardContent>>,
     }
 
     impl FakeBackend {
         fn new(initial: Option<&str>) -> Arc<Self> {
             Arc::new(Self {
-                content: StdMutex::new(initial.map(str::to_string)),
+                content: StdMutex::new(initial.map(ClipboardContent::text)),
             })
+        }
+
+        /// Test convenience mirroring the old text-only API.
+        fn set_text(&self, text: &str) {
+            *self.content.lock().unwrap() = Some(ClipboardContent::text(text));
+        }
+
+        fn get_text(&self) -> Option<String> {
+            self.content.lock().unwrap().as_ref().and_then(ClipboardContent::as_text)
         }
     }
 
     impl ClipboardBackend for FakeBackend {
-        fn get_text(&self) -> Result<Option<String>> {
+        fn get_content(&self) -> Result<Option<ClipboardContent>> {
             Ok(self.content.lock().unwrap().clone())
         }
 
-        fn set_text(&self, text: &str) -> Result<()> {
-            *self.content.lock().unwrap() = Some(text.to_string());
+        fn set_content(&self, content: &ClipboardContent) -> Result<()> {
+            *self.content.lock().unwrap() = Some(content.clone());
             Ok(())
         }
     }
@@ -258,7 +328,7 @@ mod tests {
 
         assert!(sync.poll_local_change().unwrap().is_none());
 
-        backend.set_text("copied text").unwrap();
+        backend.set_text("copied text");
         let change = sync
             .poll_local_change()
             .unwrap()
@@ -280,7 +350,7 @@ mod tests {
             content_hash: hash_content(b"from peer"),
         };
         sync.apply_incoming(&incoming, "peer-device-1").unwrap();
-        assert_eq!(backend.get_text().unwrap().as_deref(), Some("from peer"));
+        assert_eq!(backend.get_text().as_deref(), Some("from peer"));
 
         // Simulate the poll loop reading the clipboard back after the
         // backend applied the peer's update -- this must NOT be
@@ -301,15 +371,57 @@ mod tests {
         let sync = ClipboardSync::new(backend.clone());
 
         for i in 0..(HISTORY_CAPACITY + 5) {
-            backend.set_text(&format!("entry-{i}")).unwrap();
+            backend.set_text(&format!("entry-{i}"));
             sync.poll_local_change().unwrap();
         }
 
         assert_eq!(sync.history().len(), HISTORY_CAPACITY);
         assert_eq!(
             sync.history().last().unwrap().content,
-            format!("entry-{}", HISTORY_CAPACITY + 4)
+            format!("entry-{}", HISTORY_CAPACITY + 4).into_bytes()
         );
+    }
+
+    #[test]
+    fn oversized_local_content_is_recorded_but_not_sent() {
+        let backend = FakeBackend::new(None);
+        let sync = ClipboardSync::new(backend.clone());
+
+        let huge = ClipboardContent {
+            mime_type: "image/png".to_string(),
+            bytes: vec![0u8; MAX_CLIPBOARD_BYTES + 1],
+        };
+        backend.set_content(&huge).unwrap();
+
+        let change = sync.poll_local_change().unwrap();
+        assert!(change.is_none(), "oversized content must never be sent");
+
+        assert_eq!(sync.history().len(), 1);
+        let entry = &sync.history()[0];
+        assert!(entry.oversized);
+        assert!(entry.content.is_empty(), "oversized bytes are not retained");
+        assert_eq!(entry.byte_size, (MAX_CLIPBOARD_BYTES + 1) as i64);
+    }
+
+    #[test]
+    fn oversized_incoming_content_is_rejected() {
+        let backend = FakeBackend::new(None);
+        let sync = ClipboardSync::new(backend.clone());
+
+        let huge = vec![0u8; MAX_CLIPBOARD_BYTES + 1];
+        let incoming = ClipboardData {
+            mime_type: "image/png".to_string(),
+            content: huge.clone(),
+            captured_at_ms: now_ms(),
+            content_hash: hash_content(&huge),
+        };
+
+        assert!(sync.apply_incoming(&incoming, "peer-device-4").is_ok());
+        assert!(
+            backend.get_content().unwrap().is_none(),
+            "oversized incoming content must not be applied to the backend"
+        );
+        assert!(sync.history().is_empty());
     }
 
     #[traced_test]
@@ -327,7 +439,7 @@ mod tests {
         };
 
         assert!(sync.apply_incoming(&incoming, "peer-device-2").is_ok());
-        assert_eq!(backend.get_text().unwrap().as_deref(), Some("skewed"));
+        assert_eq!(backend.get_text().as_deref(), Some("skewed"));
 
         // T-902: applying still isn't enough on its own -- the
         // implementation is supposed to warn whenever it detects skew

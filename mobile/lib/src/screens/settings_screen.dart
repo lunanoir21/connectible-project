@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:provider/provider.dart';
 
+import '../app_info.dart';
 import '../i18n/strings.dart';
 import 'doctor_screen.dart';
 import '../services/notification_listener.dart';
@@ -21,8 +22,13 @@ class SettingsScreen extends StatelessWidget {
   ];
 
   Future<void> _setPairableEnabled(BuildContext context, bool enabled) async {
+    final s = context.strings;
     context.read<SettingsModel>().setPairableEnabled(enabled);
-    await context.read<PairingModel>().setPairableEnabled(enabled);
+    await context.read<PairingModel>().setPairableEnabled(
+          enabled,
+          notifTitle: s.t('home.receivingTitle'),
+          notifText: s.t('home.receivingOnHint'),
+        );
   }
 
   @override
@@ -125,7 +131,7 @@ class SettingsScreen extends StatelessWidget {
           child: Column(
             children: [
               _AboutRow(
-                  label: s.t('settings.version'), value: '0.1.0', palette: p),
+                  label: s.t('settings.version'), value: kAppVersion, palette: p),
               Divider(color: p.line, height: 20),
               _AboutRow(
                   label: s.t('settings.security'),

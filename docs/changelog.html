@@ -1,0 +1,352 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Changelog — Connectible</title>
+<meta name="description" content="Every notable Connectible change, newest first — mirrors CHANGELOG.md in the repository.">
+<meta name="theme-color" content="#08080a">
+<meta property="og:title" content="Changelog — Connectible">
+<meta property="og:description" content="Every notable Connectible change, newest first.">
+<meta property="og:type" content="website">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' fill='%2308080a'/%3E%3Cg fill='none' stroke='%23f2f2f3' stroke-width='1.6' stroke-linecap='round'%3E%3Cpath d='M16 21.5a5.5 5.5 0 0 1 0-11'/%3E%3Cpath d='M16 25.5a9.5 9.5 0 0 1 0-19' opacity='.55'/%3E%3C/g%3E%3Ccircle cx='23' cy='9' r='2.1' fill='%23f2f2f3'/%3E%3C/svg%3E">
+<style>
+  :root {
+    color-scheme: dark;
+    --canvas: #08080a;
+    --surface: #101012;
+    --surface-2: #16161a;
+    --surface-3: #1d1d22;
+    --ink: #f2f2f3;
+    --ink-muted: #a2a2ab;
+    --ink-faint: #6d6d77;
+    --ink-ghost: #46464e;
+    --paper: #fafafa;
+    --paper-dim: #e4e4e6;
+    --line: rgba(255,255,255,0.08);
+    --line-strong: rgba(255,255,255,0.16);
+    --mono: ui-monospace, "SF Mono", "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
+    --sans: ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+  }
+  * , *::before, *::after { box-sizing: border-box; }
+  html { scroll-behavior: smooth; scroll-padding-top: 84px; }
+  body {
+    margin: 0; background: var(--canvas); color: var(--ink); font-family: var(--sans);
+    font-size: 16px; line-height: 1.65; -webkit-font-smoothing: antialiased; text-rendering: optimizeLegibility;
+  }
+  ::selection { background: var(--paper); color: var(--canvas); }
+  :focus-visible { outline: 2px solid var(--paper); outline-offset: 2px; border-radius: 2px; }
+  a { color: inherit; }
+  .skip-link {
+    position: absolute; left: 16px; top: -48px; z-index: 100;
+    background: var(--paper); color: var(--canvas);
+    font: 500 13px/1 var(--mono); padding: 10px 14px; border-radius: 6px;
+    text-decoration: none; transition: top .15s ease;
+  }
+  .skip-link:focus { top: 12px; }
+  header {
+    position: sticky; top: 0; z-index: 50;
+    background: rgba(8,8,10,0.86);
+    backdrop-filter: blur(14px); -webkit-backdrop-filter: blur(14px);
+    border-bottom: 1px solid var(--line);
+  }
+  .nav {
+    max-width: 1240px; margin: 0 auto; padding-inline: clamp(20px, 4vw, 40px);
+    display: flex; align-items: center; gap: 24px; height: 60px;
+  }
+  .brand {
+    display: flex; align-items: center; gap: 10px; text-decoration: none;
+    font-weight: 620; letter-spacing: -0.015em; font-size: 15.5px;
+  }
+  .brand svg { display: block; }
+  .brand-guide {
+    font: 500 11px/1 var(--mono); color: var(--ink-faint);
+    border: 1px solid var(--line-strong); border-radius: 6px;
+    padding: 4px 8px; letter-spacing: 0.04em; text-transform: uppercase;
+  }
+  .nav-links { display: flex; gap: 4px; margin-left: 8px; }
+  .nav-links a {
+    text-decoration: none; color: var(--ink-muted); font-size: 13.5px;
+    padding: 7px 11px; border-radius: 7px;
+    transition: color .15s ease, background .15s ease;
+  }
+  .nav-links a:hover { color: var(--ink); background: var(--surface-2); }
+  .nav-gh {
+    display: inline-flex; align-items: center; gap: 8px; margin-left: auto;
+    text-decoration: none; font-size: 13.5px; font-weight: 550;
+    color: var(--canvas); background: var(--paper); border: 1px solid var(--paper);
+    padding: 7px 14px; border-radius: 8px; white-space: nowrap;
+    transition: background .15s ease, border-color .15s ease;
+  }
+  .nav-gh:hover { background: var(--paper-dim); border-color: var(--paper-dim); }
+  @media (max-width: 860px) { .nav-links { display: none; } }
+  .shell {
+    max-width: 1180px; margin: 0 auto; padding: clamp(28px, 5vh, 52px) clamp(20px, 4vw, 40px) 100px;
+    display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: clamp(28px, 4vw, 56px); align-items: start;
+  }
+  @media (max-width: 900px) { .shell { grid-template-columns: 1fr; } }
+  .toc { position: sticky; top: 80px; display: flex; flex-direction: column; gap: 2px; }
+  @media (max-width: 900px) {
+    .toc {
+      position: static; flex-direction: row; flex-wrap: wrap; gap: 6px;
+      padding-bottom: 20px; margin-bottom: 8px; border-bottom: 1px solid var(--line);
+    }
+  }
+  .toc-label {
+    font: 500 10.5px/1 var(--mono); letter-spacing: 0.14em; text-transform: uppercase;
+    color: var(--ink-ghost); margin: 0 0 10px;
+  }
+  @media (max-width: 900px) { .toc-label { width: 100%; } }
+  .toc a {
+    text-decoration: none; color: var(--ink-faint); font-size: 13.5px;
+    padding: 7px 10px; border-radius: 7px; line-height: 1.4;
+    transition: color .15s ease, background .15s ease;
+  }
+  @media (max-width: 900px) {
+    .toc a { padding: 6px 10px; border: 1px solid var(--line); border-radius: 999px; font-size: 12.5px; }
+  }
+  .toc a:hover { color: var(--ink); background: var(--surface-2); }
+  .content { min-width: 0; max-width: 76ch; }
+  .eyebrow {
+    font: 500 11.5px/1 var(--mono); letter-spacing: 0.14em; color: var(--ink-faint);
+    text-transform: uppercase; display: inline-flex; align-items: center; gap: 12px; margin: 0;
+  }
+  .eyebrow::before { content: ""; width: 28px; height: 1px; background: var(--line-strong); }
+  h1.gtitle {
+    margin: 16px 0 0; font-size: clamp(28px, 4vw, 40px); line-height: 1.1;
+    font-weight: 650; letter-spacing: -0.03em; text-wrap: balance;
+  }
+  .guide-lede { margin: 16px 0 0; color: var(--ink-muted); font-size: 15.5px; text-wrap: pretty; }
+  .content a.inline { color: var(--ink); text-decoration: underline; text-decoration-color: var(--line-strong); text-underline-offset: 3px; }
+  .content a.inline:hover { text-decoration-color: var(--ink-muted); }
+  .content code { font-family: var(--mono); font-size: 0.88em; background: var(--surface-2); border: 1px solid var(--line); border-radius: 5px; padding: 1.5px 6px; color: var(--ink-muted); }
+  .content strong { color: var(--ink); font-weight: 590; }
+
+  .version { margin-top: 56px; padding-top: 40px; border-top: 1px solid var(--line); }
+  .version:first-of-type { margin-top: 40px; padding-top: 0; border-top: none; }
+  .vhead { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .vhead h2 { margin: 0; font-size: 22px; font-weight: 640; letter-spacing: -0.02em; }
+  .vtag {
+    font: 550 10.5px/1 var(--mono); letter-spacing: 0.06em; text-transform: uppercase;
+    padding: 4px 9px; border-radius: 999px; border: 1px solid var(--line-strong); color: var(--ink-muted);
+  }
+  .vtag.unreleased { color: var(--ink); background: var(--surface-2); }
+  .vnote { margin: 12px 0 0; color: var(--ink-faint); font-size: 13.8px; line-height: 1.65; text-wrap: pretty; }
+
+  .phase { margin-top: 32px; }
+  .phead { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .phead h3 { margin: 0; font-size: 16px; font-weight: 620; letter-spacing: -0.01em; }
+  .pdate { font: 500 11px/1 var(--mono); color: var(--ink-ghost); }
+
+  .kind {
+    margin-top: 14px; font: 550 10.5px/1 var(--mono); letter-spacing: 0.1em; text-transform: uppercase;
+    color: var(--ink-faint);
+  }
+  ul.plain { margin: 10px 0 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 9px; }
+  ul.plain li {
+    font-size: 14px; line-height: 1.62; color: var(--ink-muted);
+    padding-left: 18px; position: relative; text-wrap: pretty;
+  }
+  ul.plain li::before { content: "\2014"; position: absolute; left: 0; color: var(--ink-ghost); }
+
+  .callout {
+    margin-top: 14px; border-left: 2px solid var(--line-strong); padding: 4px 0 4px 16px;
+    font-size: 13.5px; line-height: 1.62; color: var(--ink-faint);
+  }
+  .callout b { color: var(--ink-muted); font-weight: 590; }
+  .callout.warn { border-left-color: #6d6d77; }
+
+  footer { border-top: 1px solid var(--line); padding: 32px 0 40px; margin-top: 24px; }
+  .foot-wrap {
+    max-width: 1180px; margin: 0 auto; padding-inline: clamp(20px, 4vw, 40px);
+    display: flex; justify-content: space-between; gap: 16px; flex-wrap: wrap;
+    font: 400 12px/1.6 var(--mono); color: var(--ink-ghost);
+  }
+  footer a { text-decoration: none; color: var(--ink-faint); }
+  footer a:hover { color: var(--ink); }
+</style>
+</head>
+<body>
+<a class="skip-link" href="#main">skip to content</a>
+
+<header>
+  <div class="nav">
+    <a class="brand" href="index.html" aria-label="Connectible — home">
+      <svg width="22" height="22" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+        <path d="M16 21.5a5.5 5.5 0 0 1 0-11" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>
+        <path d="M16 25.5a9.5 9.5 0 0 1 0-19" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" opacity=".5"/>
+        <circle cx="23" cy="9" r="2.2" fill="currentColor"/>
+      </svg>
+      Connectible
+    </a>
+    <span class="brand-guide">Changelog</span>
+    <nav class="nav-links" aria-label="Sections">
+      <a href="index.html">Home</a>
+      <a href="guide/index.html">Guide</a>
+    </nav>
+    <a class="nav-gh" href="https://github.com/lunanoir21/connectible-project" rel="noopener">
+      <svg width="15" height="15" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+        <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/>
+      </svg>
+      GitHub
+    </a>
+  </div>
+</header>
+
+<div class="shell">
+  <nav class="toc" aria-label="Versions">
+    <p class="toc-label">Versions</p>
+    <a href="#unreleased">Unreleased</a>
+    <a href="#v0-1-0">0.1.0</a>
+  </nav>
+  <main class="content" id="main">
+
+    <p class="eyebrow crumb"><a href="index.html">Connectible</a> / Changelog</p>
+    <h1 class="gtitle">Changelog.</h1>
+    <p class="guide-lede">
+      Every notable change, newest first. This page mirrors
+      <a class="inline" href="https://github.com/lunanoir21/connectible-project/blob/main/CHANGELOG.md" rel="noopener"><code>CHANGELOG.md</code></a>
+      in the repository root, kept current after every phase of work rather
+      than written once at release time. For the full task-by-task record
+      behind any entry here, see
+      <a class="inline" href="https://github.com/lunanoir21/connectible-project/blob/main/docs/TASKS.md" rel="noopener"><code>docs/TASKS.md</code></a>
+      and
+      <a class="inline" href="https://github.com/lunanoir21/connectible-project/blob/main/docs/TASKS-audit-fixes.md" rel="noopener"><code>docs/TASKS-audit-fixes.md</code></a>.
+    </p>
+
+    <section class="version" id="unreleased">
+      <div class="vhead">
+        <h2>Unreleased</h2>
+        <span class="vtag unreleased">in progress</span>
+      </div>
+      <p class="vnote">
+        Two tracks since 0.1.0: the roadmap phases in <code>docs/TASKS.md</code>
+        (G through L below — N is real-device battery measurement and
+        stays parked until requested) and a seven-phase audit-fix
+        campaign in <code>docs/TASKS-audit-fixes.md</code> (X1&ndash;X7).
+        No version bump yet.
+      </p>
+
+      <div class="phase">
+        <div class="phead"><h3>Phase L &mdash; Clipboard rich content (images)</h3><span class="pdate">2026-07-24</span></div>
+        <p class="kind">Added</p>
+        <ul class="plain">
+          <li>Clipboard sync now carries <code>image/png</code> payloads (new <code>mime_type</code> / binary <code>payload</code> fields on <code>ClipboardData</code>) alongside text, captured and applied on the daemon (Wayland <code>wlr-data-control-unstable-v1</code> and X11), rendered as thumbnails with a "copy image" action on desktop, and round-tripped on mobile via <code>super_clipboard</code>.</li>
+          <li>A 10&nbsp;MB hard cap on clipboard payload size, enforced identically on all three platforms; an oversized copy records a metadata-only history entry with a clear "too large" message instead of a silent drop or partial send.</li>
+        </ul>
+        <div class="callout warn"><b>Known gap:</b> mobile's manual "Send" button still only reads the OS text clipboard when auto-monitor is off &mdash; only the always-on background poll captures images.</div>
+      </div>
+
+      <div class="phase">
+        <div class="phead"><h3>Phase K &mdash; Notification dismiss-sync</h3><span class="pdate">2026-07-23</span></div>
+        <p class="kind">Added</p>
+        <ul class="plain">
+          <li>Dismissing a mirrored notification on desktop now clears the real notification on the paired phone (new loopback <code>DismissNotification</code> RPC, <code>NotificationListenerService.cancelNotification</code> on Android). The phone-to-desktop direction already existed; this closes the reverse one.</li>
+          <li>A per-notification-id echo guard on mobile stops the OS's own removal callback from bouncing back out as a spurious second dismiss frame.</li>
+        </ul>
+      </div>
+
+      <div class="phase">
+        <div class="phead"><h3>Audit-fix campaign</h3><span class="pdate">2026-07-22/23</span></div>
+        <p class="vnote" style="margin-top:8px;">Three parallel read-only audits (desktop, mobile, docs) against the 0.1.0 codebase turned into a seven-phase fix campaign.</p>
+        <p class="kind">Fixed</p>
+        <ul class="plain">
+          <li>Phone-initiated (QR/scan) pairing now persists the requester-side peer and pins the observed TLS fingerprint on <code>ConfirmPin</code> success, so a subsequent desktop-to-phone file push is no longer rejected as unpaired.</li>
+          <li>Received files on mobile are reliably reachable and no longer risk a crash on missing/renamed files; a UI-spawned desktop daemon no longer deadlocks once its stdout/stderr pipes fill.</li>
+          <li>Several silent failure paths now surface actionable, localized errors: pairing/connection failures on mobile's Home screen, a daemon-side <code>FINGERPRINT_CHANGED</code> rejection, restored transfer-history rows misreporting progress, and an externally-managed daemon's "stop" action.</li>
+          <li>PIN generation, cert/key file permissions, and unbounded flood/queue paths hardened further across both platforms.</li>
+          <li>Mobile now acquires an Android multicast lock while discovering and pauses mDNS sweeps while backgrounded.</li>
+        </ul>
+        <p class="kind">Added</p>
+        <ul class="plain">
+          <li><code>DiagnosticCheck.summary_key</code> / <code>.remediation_key</code> give System Doctor text stable ids for client-side localization.</li>
+          <li><code>RecordTransferHistory</code> / <code>ListTransferHistory</code> RPCs persist and paginate transfer history across daemon restarts.</li>
+          <li><code>PreArmPairingCode</code> RPC lets desktop generate a pairing PIN up front to embed in a QR code.</li>
+          <li>Android foreground service for the receiving/discoverable role, keeping the inbound server + mDNS advertise alive under Doze/OEM background kills.</li>
+        </ul>
+        <p class="kind">Changed</p>
+        <ul class="plain">
+          <li>Docs reorganized under <code>docs/</code>; dead code removed (pre-audit doctor commands, orphan components, the UI-less "desktop drives the phone" input-session path).</li>
+        </ul>
+      </div>
+
+      <div class="phase">
+        <div class="phead"><h3>Phase J &mdash; Persisted transfer history</h3></div>
+        <p class="kind">Added</p>
+        <ul class="plain">
+          <li>Daemon-owned <code>transfer_history</code> SQLite table serves both directions for desktop: incoming rows written directly by <code>upload_file</code>; outgoing rows reported back via a new loopback <code>RecordTransferHistory</code> RPC, since an outgoing send bypasses the local daemon entirely. A retention cap keeps the table bounded.</li>
+          <li>Mobile persists its own transfer history independently via <code>shared_preferences</code>, mirroring the existing paired-device-roster persistence pattern.</li>
+          <li>Transfer history now survives a daemon restart / app close on both platforms instead of losing every record.</li>
+        </ul>
+      </div>
+
+      <div class="phase">
+        <div class="phead"><h3>Phase I &mdash; Retired the legacy chunk-transfer path</h3></div>
+        <p class="kind">Removed</p>
+        <ul class="plain">
+          <li>The original <code>SyncStream</code>-multiplexed <code>FileChunk</code> / <code>FileTransferStart</code> / <code>FileChunkRequest</code> frames and their daemon/desktop/mobile handling, superseded by the dedicated <code>PrepareUpload</code> / <code>UploadFile</code> streaming path (resume, cancel, progress, and whole-file hash verification already had parity there). <code>SyncFrame</code> proto fields 3, 4, 9 marked <code>reserved</code>.</li>
+        </ul>
+        <div class="callout warn"><b>Accepted trade-off:</b> per-chunk corrupted-chunk resend has no equivalent on the dedicated path &mdash; a whole-file hash mismatch now forces a full restart instead of resending one chunk. TLS 1.3's AEAD already rules out transit corruption, so this only affects recovery efficiency for a rare sender-side fault.</div>
+      </div>
+
+      <div class="phase">
+        <div class="phead"><h3>Phase H &mdash; SQLite at-rest encryption</h3><span class="pdate">2026-07-20</span></div>
+        <p class="kind">Security</p>
+        <ul class="plain">
+          <li><code>devices.cert_fingerprint</code> is now encrypted at rest with AES-256-GCM (chosen over SQLCipher to avoid a C dependency / static-linking risk). Key sourced from a <code>CONNECTIBLE_DB_KEY_FILE</code> override, then the OS keyring, then a <code>0600</code> key-file fallback for headless hosts. Existing plaintext rows migrate in place on startup, each verified round-trip before being overwritten.</li>
+          <li>New System Doctor check reports which key source is active.</li>
+        </ul>
+      </div>
+
+      <div class="phase">
+        <div class="phead"><h3>Phase G &mdash; Bidirectional mTLS identity pinning</h3><span class="pdate">2026-07-20</span></div>
+        <p class="kind">Security</p>
+        <ul class="plain">
+          <li>The daemon now requests a client TLS certificate on every inbound connection and pins its fingerprint against the device_id on successful pairing &mdash; closing a gap where anyone on the LAN who learned a paired device's id could impersonate it without any credential. A later mismatch is rejected the same way a changed server fingerprint already was.</li>
+          <li>Desktop and mobile now present their own long-lived identity as their outbound TLS client certificate too.</li>
+        </ul>
+        <div class="callout warn"><b>Known asymmetry:</b> a <code>dart:io</code> platform limitation means mobile's own inbound server can't yet perform the equivalent client-cert check. Documented, not silently dropped.</div>
+      </div>
+    </section>
+
+    <section class="version" id="v0-1-0">
+      <div class="vhead"><h2>0.1.0</h2></div>
+      <p class="vnote">
+        Connectible reaches a desktop-environment-agnostic, security-hardened,
+        tested v0.1.0 across all three components (daemon, desktop, mobile).
+      </p>
+      <div class="phase">
+        <p class="kind">Added</p>
+        <ul class="plain">
+          <li>Native Wayland clipboard and remote-input backends, verified on Hyprland &mdash; no XWayland dependency for core sync features.</li>
+          <li>A per-chunk re-request mechanism for corrupted file transfers, implemented end-to-end with fault-injection tests (later retired in Phase I once TLS-level integrity made it redundant).</li>
+          <li>Bidirectional pairing: the mobile app runs its own gRPC/TLS server, so either a desktop or a phone can initiate pairing.</li>
+          <li>Forget/unpair device action, a pairable opt-out toggle, and remote-input/clipboard-sync toggles wired end-to-end on both platforms.</li>
+          <li>Systemd user-service packaging for the daemon.</li>
+        </ul>
+        <p class="kind">Changed</p>
+        <ul class="plain">
+          <li>Mobile's monolithic <code>AppModel</code> split into focused <code>ChangeNotifier</code>s, each with its own test coverage.</li>
+          <li>Desktop and daemon errors now map through a shared <code>ErrorCode</code> scheme instead of raw <code>tonic::Status</code> text.</li>
+        </ul>
+        <p class="kind">Fixed</p>
+        <ul class="plain">
+          <li>Wayland clipboard backend deadlock and a daemon shutdown hang, both found via manual verification with regression tests added.</li>
+          <li>PIN generation's modulo bias, a cert/key file-permission TOCTOU window, and an unbounded input-event queue.</li>
+          <li>TLS 1.3 enforcement gap on the mobile server, mobile file-receive filename collisions.</li>
+        </ul>
+      </div>
+    </section>
+
+  </main>
+</div>
+
+<footer>
+  <div class="foot-wrap">
+    <span>&copy; <span id="year">2026</span> Connectible</span>
+    <span><a href="index.html">Home</a> &middot; <a href="guide/index.html">Guide</a> &middot; <a href="https://github.com/lunanoir21/connectible-project" rel="noopener">GitHub</a> &middot; <a href="https://github.com/lunanoir21/connectible-project/blob/main/CHANGELOG.md" rel="noopener">CHANGELOG.md</a></span>
+  </div>
+</footer>
+<script>document.getElementById("year").textContent = new Date().getFullYear();</script>
+</body>
+</html>

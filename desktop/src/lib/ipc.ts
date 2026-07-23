@@ -69,7 +69,6 @@ export const ipc = {
   stopDaemon: () => call<boolean>("stop_daemon"),
   getLocalState: () => call<LocalState>("get_local_state"),
   listDevices: () => call<Device[]>("list_devices"),
-  pingDaemon: () => call<number>("ping_daemon"),
 
   // This machine's LAN IPv4 addresses + daemon port, so Home can show
   // its own "connect by address" endpoint (the reverse of manual
@@ -89,8 +88,6 @@ export const ipc = {
   // instead of silently no-op'ing where the plugin's single mechanism
   // isn't present.
   openPath: (path: string) => call<null>("open_path", { path }),
-  checkTcpPort: (port: number) => call<boolean>("check_tcp_port", { port }),
-  checkTlsHandshake: () => call<null>("check_tls_handshake"),
 
   // Drops the local daemon's live-connection attribution for a paired
   // device (T-102's "Disconnect" action). Returns whether a live
@@ -104,6 +101,12 @@ export const ipc = {
   // exchange to re-pair afterward.
   forgetDevice: (deviceId: string) =>
     call<boolean>("forget_device", { deviceId }),
+
+  // Dismisses a mirrored notification (T-K5): removes it from this
+  // device's own list and asks the daemon to relay the dismissal to the
+  // peer it came from, so the real system notification clears there too.
+  dismissNotification: (notificationId: string) =>
+    call<null>("dismiss_notification", { notificationId }),
 
   // Gates whether incoming remote input is applied (T-309). Returns
   // the value now in effect.

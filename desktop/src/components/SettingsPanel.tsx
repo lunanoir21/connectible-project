@@ -58,12 +58,20 @@ export function SettingsPanel({
   useEffect(() => {
     let alive = true;
     ipc.getDownloadDir().then((r) => {
-      if (alive && r.ok) setDownloadDir(r.value);
+      if (!alive) return;
+      if (r.ok) {
+        setDownloadDir(r.value);
+      } else {
+        // T-X30: a failed fetch used to leave this row on "Loading..."
+        // forever, with the Open/Change buttons quietly staying disabled
+        // and no indication why.
+        setActionError(errorCodeMessage(r.error.code, t));
+      }
     });
     return () => {
       alive = false;
     };
-  }, []);
+  }, [t]);
 
   const changeDownloadDir = useCallback(async () => {
     const selected = await open({ directory: true, multiple: false });
@@ -248,7 +256,7 @@ export function SettingsPanel({
                         ? t("daemon.reachable")
                         : t("daemon.unreachable")}
                   </span>
-                  {daemonStatus.running && daemonStatus.reachable && daemonStatus.rttMs && (
+                  {daemonStatus.running && daemonStatus.reachable && daemonStatus.rttMs !== null && (
                     <span className="text-xs text-ink-faint nums">
                       {t("daemon.rtt", { ms: daemonStatus.rttMs })}
                     </span>

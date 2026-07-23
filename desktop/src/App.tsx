@@ -16,10 +16,14 @@ import { useT, useI18n, type TranslationKey } from "./i18n";
 import { useTheme } from "./theme";
 import { ipc } from "./lib/ipc";
 import type { NearbyDevice, DaemonStatusDto } from "./lib/types";
+import packageJson from "../package.json";
 
 type RequesterPairing = { device: NearbyDevice; pinExpiresAtMs: number };
 
-const APP_VERSION = "0.1.0";
+// T-X30: sourced from package.json (the release process's single source
+// of truth for the version) instead of a hand-written duplicate that
+// silently drifts on every bump.
+const APP_VERSION = packageJson.version;
 
 // rttMs is deliberately excluded: it's a live measurement that changes
 // almost every poll, and StatusBar's daemon chip hides itself entirely

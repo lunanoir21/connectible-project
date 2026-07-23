@@ -28,6 +28,8 @@ const report: DiagnosticsReport = {
       detail: "",
       remediation: "",
       data: {},
+      summaryKey: "doctor.msg.dirWritable.exists",
+      remediationKey: "",
     },
     {
       id: "daemon-port",
@@ -38,6 +40,8 @@ const report: DiagnosticsReport = {
       detail: "",
       remediation: "Start the daemon.",
       data: {},
+      summaryKey: "",
+      remediationKey: "",
     },
     {
       id: "paired-store",
@@ -48,6 +52,8 @@ const report: DiagnosticsReport = {
       detail: "",
       remediation: "They pin automatically on the next connect.",
       data: {},
+      summaryKey: "",
+      remediationKey: "",
     },
   ],
 };
@@ -92,6 +98,8 @@ describe("ConnectionDoctorPanel", () => {
           detail: "",
           remediation: "",
           data: {},
+          summaryKey: "doctor.msg.some-unrecognized-message-id",
+          remediationKey: "",
         },
       ],
     };
@@ -117,6 +125,61 @@ describe("ConnectionDoctorPanel", () => {
       // ...and badges are localized ("Hata"/"Uyarı"), not hardcoded.
       expect(screen.getAllByText("Hata").length).toBeGreaterThanOrEqual(1);
       expect(screen.getAllByText("Uyarı").length).toBeGreaterThanOrEqual(1);
+    } finally {
+      if (originalLanguage) {
+        Object.defineProperty(navigator, "language", originalLanguage);
+      }
+    }
+  });
+
+  it("localizes a check's summary + remediation via message id under Turkish, falling back to daemon English for an unknown id (T-X43)", async () => {
+    const withMessageIds: DiagnosticsReport = {
+      worst: "warn",
+      checks: [
+        {
+          id: "paired-store",
+          title: "Paired devices",
+          category: "pairing",
+          status: "warn",
+          summary: "1 device(s) not yet cert-pinned",
+          detail: "",
+          remediation: "These were paired before certificate pinning; they pin automatically on the next connect.",
+          data: { unpinned: "1" },
+          summaryKey: "doctor.msg.pairedStore.notPinned",
+          remediationKey: "doctor.msg.pairedStore.notPinned.remediation",
+        },
+        {
+          id: "daemon-port",
+          title: "Daemon port",
+          category: "network",
+          status: "ok",
+          summary: "Some brand new daemon-only wording",
+          detail: "",
+          remediation: "",
+          data: {},
+          summaryKey: "doctor.msg.some-unrecognized-message-id",
+          remediationKey: "",
+        },
+      ],
+    };
+    runDiagnostics.mockResolvedValue(ok(withMessageIds));
+    const originalLanguage = Object.getOwnPropertyDescriptor(navigator, "language");
+    Object.defineProperty(navigator, "language", { value: "tr-TR", configurable: true });
+    try {
+      render(
+        <I18nProvider>
+          <ConnectionDoctorPanel />
+        </I18nProvider>,
+      );
+      // Known message id -> Turkish template, interpolated against `data`.
+      await waitFor(() =>
+        expect(screen.getByText("1 cihazın sertifikası henüz sabitlenmedi")).toBeInTheDocument(),
+      );
+      expect(
+        screen.getByText(/Bunlar sertifika sabitlemesinden önce eşleşmişti/),
+      ).toBeInTheDocument();
+      // Unknown message id -> falls back to the daemon's raw English summary.
+      expect(screen.getByText("Some brand new daemon-only wording")).toBeInTheDocument();
     } finally {
       if (originalLanguage) {
         Object.defineProperty(navigator, "language", originalLanguage);

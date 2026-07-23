@@ -11,6 +11,7 @@ import 'package:connectible_mobile/src/generated/connectible.pbgrpc.dart'
 import 'package:connectible_mobile/src/models/models.dart';
 import 'package:connectible_mobile/src/services/connectible_server.dart';
 import 'package:connectible_mobile/src/services/pairing_manager.dart';
+import 'package:connectible_mobile/src/services/receiving_service.dart';
 import 'package:connectible_mobile/src/services/server_identity.dart';
 import 'package:connectible_mobile/src/state/device_list_model.dart';
 import 'package:connectible_mobile/src/state/pairing_model.dart';
@@ -84,10 +85,12 @@ void main() {
   PairingModel buildPairing(
     DeviceListModel deviceList, {
     void Function(pb.ClipboardData)? onClipboardFrame,
+    void Function(pb.NotificationData)? onNotificationFrame,
   }) =>
       PairingModel(
         deviceList: deviceList,
         onClipboardFrame: onClipboardFrame ?? (_) {},
+        onNotificationFrame: onNotificationFrame,
         pairableEnabled: false,
         ownIdentityLoader: () async => ownIdentity,
       );
@@ -145,6 +148,71 @@ void main() {
       await Future<void>.delayed(Duration.zero);
 
       expect(clip?.content, 'hi'.codeUnits);
+    });
+
+    test(
+        'dispatches an inbound notification frame to its callback once the '
+        'peer has identified itself (T-K4)', () async {
+      final deviceList = await buildDeviceList();
+      pb.NotificationData? notification;
+      final pairing = buildPairing(
+        deviceList,
+        onNotificationFrame: (n) => notification = n,
+      );
+      addTearDown(() {
+        pairing.dispose();
+        deviceList.dispose();
+      });
+      deviceList.addPairedDevice(
+          pb.Identity(deviceId: 'peer-1', deviceName: 'Peer One'));
+
+      final inbound = StreamController<pb.SyncFrame>();
+      final sub = pairing.onInboundSyncStream(inbound.stream).listen((_) {});
+      addTearDown(() {
+        sub.cancel();
+        inbound.close();
+      });
+
+      inbound.add(pb.SyncFrame(identity: pb.Identity(deviceId: 'peer-1')));
+      inbound.add(pb.SyncFrame(
+          notification: pb.NotificationData(
+              notificationId: 'n-1', isDismissal: true)));
+      await Future<void>.delayed(Duration.zero);
+
+      expect(notification?.notificationId, 'n-1');
+      expect(notification?.isDismissal, isTrue);
+    });
+
+    test(
+        'activePeerId falls back to the inbound peer once it has '
+        'identified itself, for a session with no outbound dial (T-X24)',
+        () async {
+      final deviceList = await buildDeviceList();
+      final pairing = buildPairing(deviceList);
+      addTearDown(() {
+        pairing.dispose();
+        deviceList.dispose();
+      });
+      deviceList.addPairedDevice(
+          pb.Identity(deviceId: 'peer-1', deviceName: 'Peer One'));
+
+      // Nothing set yet -- no outbound session, no inbound Identity frame.
+      expect(pairing.activePeerId, isNull);
+
+      final inbound = StreamController<pb.SyncFrame>();
+      final sub = pairing.onInboundSyncStream(inbound.stream).listen((_) {});
+      addTearDown(() {
+        sub.cancel();
+        inbound.close();
+      });
+
+      inbound.add(pb.SyncFrame(identity: pb.Identity(deviceId: 'peer-1')));
+      await Future<void>.delayed(Duration.zero);
+
+      // This is what lets an inbound-only file push (e.g. a desktop
+      // sending to this phone with no prior outbound dial from here)
+      // record the real sender in transfer history instead of ''.
+      expect(pairing.activePeerId, 'peer-1');
     });
 
     test(
@@ -586,4 +654,116 @@ void main() {
       expect(clip?.content, 'push'.codeUnits);
     });
   });
+
+  group('PairingModel - receiving-role foreground service (T-X36)', () {
+    test(
+        'setPairableEnabled(true) starts the receiving service with the '
+        'given strings; setPairableEnabled(false) stops it', () async {
+      final deviceList = await buildDeviceList();
+      final receiving = _FakeReceivingService();
+      final pairing = PairingModel(
+        deviceList: deviceList,
+        onClipboardFrame: (_) {},
+        pairableEnabled: false,
+        ownIdentityLoader: () async => ownIdentity,
+        receivingService: receiving,
+        serverPort: 0,
+      );
+      addTearDown(() {
+        pairing.dispose();
+        deviceList.dispose();
+      });
+
+      expect(receiving.startCalls, isEmpty);
+
+      await pairing.setPairableEnabled(true,
+          notifTitle: 'Discoverable', notifText: 'Other devices can find this phone.');
+
+      expect(receiving.startCalls, [
+        ('Discoverable', 'Other devices can find this phone.'),
+      ]);
+      expect(receiving.stopCalls, 0);
+
+      await pairing.setPairableEnabled(false);
+
+      expect(receiving.stopCalls, 1);
+    });
+
+    test(
+        'falls back to English defaults when no notification strings are '
+        'given', () async {
+      final deviceList = await buildDeviceList();
+      final receiving = _FakeReceivingService();
+      final pairing = PairingModel(
+        deviceList: deviceList,
+        onClipboardFrame: (_) {},
+        pairableEnabled: false,
+        ownIdentityLoader: () async => ownIdentity,
+        receivingService: receiving,
+        serverPort: 0,
+      );
+      addTearDown(() {
+        pairing.dispose();
+        deviceList.dispose();
+      });
+
+      await pairing.setPairableEnabled(true);
+
+      expect(receiving.startCalls, [
+        ('Discoverable', 'Other devices can find this phone and send it files.'),
+      ]);
+    });
+
+    test(
+        'refreshReceivingNotification re-posts with fresh strings only '
+        'while the server is running', () async {
+      final deviceList = await buildDeviceList();
+      final receiving = _FakeReceivingService();
+      final pairing = PairingModel(
+        deviceList: deviceList,
+        onClipboardFrame: (_) {},
+        pairableEnabled: false,
+        ownIdentityLoader: () async => ownIdentity,
+        receivingService: receiving,
+        serverPort: 0,
+      );
+      addTearDown(() {
+        pairing.dispose();
+        deviceList.dispose();
+      });
+
+      // Not running yet -- a no-op.
+      pairing.refreshReceivingNotification('Keşfedilebilir', 'Metin');
+      expect(receiving.startCalls, isEmpty);
+
+      await pairing.setPairableEnabled(true,
+          notifTitle: 'Discoverable', notifText: 'English text');
+      expect(receiving.startCalls.length, 1);
+
+      // Now running -- catches the notification up to the new strings.
+      pairing.refreshReceivingNotification('Keşfedilebilir', 'Metin');
+      expect(receiving.startCalls, [
+        ('Discoverable', 'English text'),
+        ('Keşfedilebilir', 'Metin'),
+      ]);
+    });
+  });
+}
+
+/// Records every start/stop call instead of touching a real platform
+/// channel (T-X36) -- mirrors the fake-injection pattern already used for
+/// `ownIdentityLoader` in this same file.
+class _FakeReceivingService implements ReceivingService {
+  final startCalls = <(String, String)>[];
+  var stopCalls = 0;
+
+  @override
+  Future<void> start(String title, String text) async {
+    startCalls.add((title, text));
+  }
+
+  @override
+  Future<void> stop() async {
+    stopCalls++;
+  }
 }

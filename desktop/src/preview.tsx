@@ -43,10 +43,27 @@ const nearby: NearbyDevice[] = [
   { deviceId: "d7", deviceName: "MacBook Air", platform: "PLATFORM_MACOS", addr: "192.168.1.42", port: 58231 },
 ];
 
+// Preview entries carry base64 content, matching the real DTO (Phase L:
+// clipboard content is raw bytes, not a plain string).
+function textEntry(text: string, capturedAtMs: number, source: string): ClipboardEntry {
+  return {
+    content: btoa(text),
+    mimeType: "text/plain",
+    capturedAtMs,
+    source,
+    oversized: false,
+    byteSize: text.length,
+  };
+}
+
 const clipboard: ClipboardEntry[] = [
-  { content: "https://connectible.io/docs/pairing#tls-1.3", mimeType: "text/plain", capturedAtMs: now - 4000, source: "Anil's Pixel" },
-  { content: "cargo build --release -p connectibled", mimeType: "text/plain", capturedAtMs: now - 60_000, source: "local" },
-  { content: "The quick brown fox jumps over the lazy dog and keeps on running past the margin", mimeType: "text/plain", capturedAtMs: now - 5 * 60_000, source: "Living Room TV" },
+  textEntry("https://connectible.io/docs/pairing#tls-1.3", now - 4000, "Anil's Pixel"),
+  textEntry("cargo build --release -p connectibled", now - 60_000, "local"),
+  textEntry(
+    "The quick brown fox jumps over the lazy dog and keeps on running past the margin",
+    now - 5 * 60_000,
+    "Living Room TV",
+  ),
 ];
 
 const battery: Battery = { percentage: 82, isCharging: true, minutesRemaining: -1, reportedAtMs: now };

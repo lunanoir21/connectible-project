@@ -140,9 +140,12 @@ class ConnectibleServer extends pb.ConnectibleServiceBase {
     }
     _pendingIdentities[requester.deviceId] = requester;
     try {
+      // T-X32: an empty name is stored as-is (not a hardcoded English
+      // fallback) -- this layer has no i18n access; the widget layer
+      // resolves it via displayDeviceName() at render time.
       final expiresAtMs = _pairing.createPending(
         requester.deviceId,
-        requester.deviceName.isEmpty ? 'Unknown device' : requester.deviceName,
+        requester.deviceName,
       );
       return pb.PairResponse(
         accepted: true,
@@ -302,6 +305,36 @@ class ConnectibleServer extends pb.ConnectibleServiceBase {
     // The daemon serves this loopback-only diagnostics RPC; the mobile app
     // runs its own in-process Doctor (T-F9/F10) instead of exposing one.
     throw const GrpcError.unimplemented('RunDiagnostics is loopback-only');
+  }
+
+  // Phase J's transfer-history RPCs and T-K5's dismiss RPC are all
+  // loopback-only in the daemon's design (a desktop's local UI calling
+  // its own same-machine daemon). Mobile has no equivalent "local UI on
+  // a separate machine from its own server" concept -- every caller to
+  // this server is inherently remote -- and each already has its own
+  // fully local, non-RPC equivalent: FileTransferModel persists its own
+  // history directly via shared_preferences (see its own doc comment),
+  // and NotificationModel.handleInbound is reached through the ordinary
+  // SyncStream `notification` frame, not this RPC. These three were
+  // simply missing from this override list (a real pre-existing gap
+  // this file's stubs being stale had been masking -- surfaced by a
+  // `gen_proto.sh` re-run during T-K5's work, not caused by it).
+  @override
+  Future<pb.RecordTransferHistoryResponse> recordTransferHistory(
+      ServiceCall call, pb.RecordTransferHistoryRequest request) async {
+    throw const GrpcError.unimplemented('RecordTransferHistory is loopback-only');
+  }
+
+  @override
+  Future<pb.ListTransferHistoryResponse> listTransferHistory(
+      ServiceCall call, pb.ListTransferHistoryRequest request) async {
+    throw const GrpcError.unimplemented('ListTransferHistory is loopback-only');
+  }
+
+  @override
+  Future<pb.DismissNotificationResponse> dismissNotification(
+      ServiceCall call, pb.DismissNotificationRequest request) async {
+    throw const GrpcError.unimplemented('DismissNotification is loopback-only');
   }
 
   // --- dedicated file upload (TASKS.md Phase A) ------------------------

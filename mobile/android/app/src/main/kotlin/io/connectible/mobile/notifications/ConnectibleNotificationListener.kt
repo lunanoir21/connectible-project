@@ -9,6 +9,7 @@ import android.os.Bundle
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.util.Log
+import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.LinkedBlockingQueue
 
 /**
@@ -26,8 +27,30 @@ import java.util.concurrent.LinkedBlockingQueue
  * Android tells us the permission was granted/revoked. We reflect both as
  * synthetic "connected"/"disconnected" events so the Dart UI stays in sync
  * without polling [getComponentEnabledSetting].
+ *
+ * T-K4 finding: dismissing a *received* notification (desktop -> phone
+ * direction) works reliably for Connectible's own use case.
+ * [NotificationListenerService.cancelNotification] only requires the
+ * listener to currently hold visibility into that notification (i.e. it
+ * is still live and was posted while we were connected) -- both hold for
+ * anything we ourselves already mirrored to the desktop, since we only
+ * ever forward what [onNotificationPosted] actually saw. It is *not*
+ * guaranteed to work for arbitrary third-party notifications on every
+ * OEM (some heavily-customized ROMs restrict cross-app cancellation),
+ * but that's outside what this feature needs. See
+ * [Companion.cancelByNotificationId].
  */
 class ConnectibleNotificationListener : NotificationListenerService() {
+
+    override fun onCreate() {
+        super.onCreate()
+        Companion.instance = this
+    }
+
+    override fun onDestroy() {
+        if (Companion.instance === this) Companion.instance = null
+        super.onDestroy()
+    }
 
     override fun onListenerConnected() {
         Log.i(TAG, "listener connected (permission granted)")
@@ -43,11 +66,17 @@ class ConnectibleNotificationListener : NotificationListenerService() {
 
     override fun onNotificationPosted(sbn: StatusBarNotification?) {
         val map = mapNotification(sbn, isRemoval = false) ?: return
+        // Remember the real system key under our synthetic id (T-K4) so a
+        // later dismiss command for this id -- arriving over the wire
+        // with only the synthetic id, not Android's own key -- can still
+        // find the live notification to cancel.
+        sbn?.let { Companion.activeKeys[map["notification_id"] as String] = it.key }
         Companion.events.offer(map)
     }
 
     override fun onNotificationRemoved(sbn: StatusBarNotification?) {
         val map = mapNotification(sbn, isRemoval = true) ?: return
+        Companion.activeKeys.remove(map["notification_id"] as String)
         Companion.events.offer(map)
     }
 
@@ -55,9 +84,13 @@ class ConnectibleNotificationListener : NotificationListenerService() {
         if (sbn == null) return null
         val n: Notification = sbn.notification ?: return null
         // Foreground-service notifications are how media players, VPNs,
-        // navigation apps, and (this app itself) stay alive. Mirroring
-        // them is noise at best and a loop at worst (we'd mirror our own
-        // transfer-progress notification), so skip the flag entirely.
+        // and navigation apps stay alive -- mirroring them is just noise.
+        // Connectible itself has no foreground service yet (T-X36,
+        // decision-gated: a receiving-role one is planned but not built),
+        // but skip the flag unconditionally regardless of source so this
+        // doesn't need revisiting when it lands -- a self-mirror loop
+        // (mirroring our own receiving-status notification) would be
+        // exactly the kind of noise this filter exists to prevent.
         if (n.flags and Notification.FLAG_FOREGROUND_SERVICE != 0) return null
         // Group-summary notifications carry no user-visible content; only
         // their children matter, and those arrive as their own posts.
@@ -119,9 +152,52 @@ class ConnectibleNotificationListener : NotificationListenerService() {
         private const val MAX_EVENTS = 512
         val events: LinkedBlockingQueue<Map<String, Any>> = LinkedBlockingQueue(MAX_EVENTS)
 
+        /**
+         * The currently-bound service instance, so [cancelByNotificationId]
+         * (a companion/static entry point, called from [NotificationPlugin]
+         * with no instance of its own) has something to call the instance
+         * method [cancelNotification] on. Null whenever the system hasn't
+         * bound us (matches [connected]'s own lifecycle, but tracked
+         * separately since this is `onCreate`/`onDestroy`-scoped rather
+         * than `onListenerConnected`/`onListenerDisconnected`-scoped).
+         */
+        @Volatile
+        private var instance: ConnectibleNotificationListener? = null
+
+        /**
+         * Maps our synthetic `notification_id` (pkg#tag#id, sent over the
+         * wire) to Android's own [StatusBarNotification.getKey], the only
+         * thing [cancelNotification] actually accepts (T-K4). Populated on
+         * every post, removed on every removal (ours or the user's) --
+         * naturally bounded by the number of currently-live notifications,
+         * not by time or a fixed cap.
+         */
+        private val activeKeys = ConcurrentHashMap<String, String>()
+
+        /**
+         * Cancels the live system notification matching a remote dismiss
+         * command's `notification_id` (T-K4/T-K5), if we're still tracking
+         * it and the listener is currently bound. Returns false (not an
+         * error) if either isn't true -- the notification may have already
+         * been dismissed locally, or access may have been revoked since.
+         */
+        fun cancelByNotificationId(id: String): Boolean {
+            val key = activeKeys[id] ?: return false
+            val service = instance ?: return false
+            return try {
+                service.cancelNotification(key)
+                true
+            } catch (e: Throwable) {
+                Log.w(TAG, "cancelNotification failed: ${e.message}")
+                false
+            }
+        }
+
         fun resetForTest() {
             connected = false
             events.clear()
+            instance = null
+            activeKeys.clear()
         }
 
         /**

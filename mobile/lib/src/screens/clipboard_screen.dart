@@ -1,12 +1,44 @@
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:provider/provider.dart';
+import 'package:super_clipboard/super_clipboard.dart' as sc;
 
+import '../models/models.dart';
 import '../state/clipboard_model.dart';
 import '../state/pairing_model.dart';
 import '../i18n/strings.dart';
 import '../theme/app_theme.dart';
 import '../widgets/ui.dart';
+
+String _formatBytes(int b) {
+  if (b < 1024) return '$b B';
+  const units = ['KB', 'MB', 'GB', 'TB'];
+  var v = b / 1024;
+  var i = 0;
+  while (v >= 1024 && i < units.length - 1) {
+    v /= 1024;
+    i++;
+  }
+  return '${v.toStringAsFixed(1)} ${units[i]}';
+}
+
+/// Copies an entry back to the OS clipboard (Phase L, T-L7): images go
+/// through `super_clipboard` (flutter/services.dart's `Clipboard` is
+/// text-only), text through the existing platform channel.
+Future<void> _copyBack(ClipboardEntry entry) async {
+  if (entry.oversized) return;
+  if (entry.isImage) {
+    final bytes = entry.imageBytes;
+    if (bytes == null) return;
+    final clipboard = sc.SystemClipboard.instance;
+    if (clipboard == null) return;
+    final item = sc.DataWriterItem();
+    item.add(sc.Formats.png(bytes));
+    await clipboard.write([item]);
+  } else {
+    await Clipboard.setData(ClipboardData(text: entry.content));
+  }
+}
 
 class ClipboardScreen extends StatelessWidget {
   const ClipboardScreen({super.key});
@@ -71,22 +103,41 @@ class ClipboardScreen extends StatelessWidget {
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
                               Expanded(
-                                child: Text(entry.content,
-                                    maxLines: 4,
-                                    overflow: TextOverflow.ellipsis,
-                                    style: TextStyle(
-                                        fontSize: 13,
-                                        height: 1.4,
-                                        color: p.ink,
-                                        fontFamily: 'monospace')),
+                                child: entry.oversized
+                                    ? Text(
+                                        s.t('clipboard.oversized', {
+                                          'size': _formatBytes(entry.byteSize),
+                                        }),
+                                        style: TextStyle(
+                                            fontSize: 13, color: p.inkFaint),
+                                      )
+                                    : entry.isImage
+                                        ? ClipRRect(
+                                            borderRadius:
+                                                BorderRadius.circular(6),
+                                            child: Image.memory(
+                                              entry.imageBytes!,
+                                              height: 96,
+                                              fit: BoxFit.contain,
+                                              alignment: Alignment.centerLeft,
+                                            ),
+                                          )
+                                        : Text(entry.content,
+                                            maxLines: 4,
+                                            overflow: TextOverflow.ellipsis,
+                                            style: TextStyle(
+                                                fontSize: 13,
+                                                height: 1.4,
+                                                color: p.ink,
+                                                fontFamily: 'monospace')),
                               ),
-                              IconButton(
-                                icon: Icon(Icons.copy_outlined,
-                                    size: 18, color: p.inkMuted),
-                                tooltip: s.t('clipboard.copy'),
-                                onPressed: () => Clipboard.setData(
-                                    ClipboardData(text: entry.content)),
-                              ),
+                              if (!entry.oversized)
+                                IconButton(
+                                  icon: Icon(Icons.copy_outlined,
+                                      size: 18, color: p.inkMuted),
+                                  tooltip: s.t('clipboard.copy'),
+                                  onPressed: () => _copyBack(entry),
+                                ),
                             ],
                           ),
                           const SizedBox(height: 4),
@@ -102,7 +153,7 @@ class ClipboardScreen extends StatelessWidget {
                               Text(
                                   local
                                       ? s.t('status.thisDevice')
-                                      : entry.source,
+                                      : s.t('clipboard.remoteSource'),
                                   style: TextStyle(
                                       fontSize: 11, color: p.inkFaint)),
                             ],
